@@ -7,7 +7,7 @@
 ## Hardware Coverage Note
 
 - **NVIDIA GPU** repos: Megatron-LM, torchtitan, miles, slime, torchada
-- **Moore Threads MUSA GPU** repo: torcht_musa
+- **Moore Threads MUSA GPU** repo: torch_musa
 - **Ascend NPU**: NOT covered by local repos. Ascend knowledge comes from external docs/papers
   (MindSpeed, torch_npu) and is marked as "external" — secondary to local source evidence.
 
@@ -133,11 +133,11 @@
 
 | User asks about... | Primary repo(s) | Secondary repo(s) |
 |--------------------|-----------------|-------------------|
-| Pre-training at scale | Megatron-LM, torchtitan | torchada, torcht_musa |
+| Pre-training at scale | Megatron-LM, torchtitan | torchada, torch_musa |
 | SFT / DPO / RLHF | Megatron-LM | torchtitan |
 | GRPO / PPO RL | miles, slime | torchtitan (TitanRL) |
 | Inference / rollout | miles, slime | — |
 | FSDP / parallelism | torchtitan, Megatron-LM | — |
 | MoE training | Megatron-LM | miles, slime |
 | Consumer GPU (Ada) | torchada | — |
-| MUSA GPU | torcht_musa | — |
+| MUSA GPU | torch_musa | — |
