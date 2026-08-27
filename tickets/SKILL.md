@@ -28,6 +28,6 @@ description: >
 
 ## 检索命令示例
 
-- "遇到过 loss NaN 吗" → 按 `tags: loss-nan` 检索
-- "预训练性能问题" → 按 `stage: pretraining` + `type: performance` 检索
-- "Megatron 相关" → 按 `frameworks: Megatron-LM` 检索
+- "遇到过 loss 发散吗" → 按 `tags: loss-divergence` 检索
+- "torch_npu 相关" → 按 `frameworks: torch_npu` 检索
+- "掉速 / 快慢卡问题" → 按 `tags: slow-card` / `tags: straggler` 检索
