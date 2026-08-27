@@ -1,10 +1,5 @@
-# Problem Ticket Template
+<!-- Copy this file, fill in the frontmatter and body, rename to YYYY-MM-DD-<short-slug>.md -->
 
-> Copy this file, fill in the frontmatter and body, rename to `YYYY-MM-DD-<short-slug>.md`.
-
----
-
-```markdown
 ---
 id: TICKET-YYYYMMDD-NNN          # NNN = per-day sequence (001, 002, ...)
 title: One-line summary of the problem
@@ -17,13 +12,7 @@ hardware:
 frameworks:
   - Megatron-LM                  # or torchtitan, miles, slime, torchada, torch_musa
 tags:
-  - loss-nan                     # choose from tag vocabulary below
-  - grad-explosion
-  - throughput
-  - oom
-  - scaling-efficiency
-  - train-infer-mismatch
-  - accuracy-regression
+  - loss-nan                     # examples: grad-explosion, throughput, oom, scaling-efficiency, train-infer-mismatch, accuracy-regression
 created: YYYY-MM-DD
 resolved: YYYY-MM-DD             # leave blank if status != resolved
 related_tickets:
@@ -83,12 +72,11 @@ How we confirmed the fix worked:
 
 Reusable insight. Cross-references:
 - See `references/source-repo-map.md` for related repos
-- See `precision/references/` for precision patterns (P2)
-- See `performance/references/` for perf techniques (P2)
+- See `precision/references/` for precision patterns (coming in P2)
+- See `performance/references/` for perf techniques (coming in P2)
 
 ## References
 
 - Papers: ...
 - Docs: ...
 - Related tickets: ...
-```
