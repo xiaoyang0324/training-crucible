@@ -6,6 +6,20 @@
 
 ---
 
+## 快速索引
+
+| 类别 | 锚点 |
+|------|------|
+| 并行计算 | [1. 并行计算](#1-并行计算-parallel-computing) |
+| 训练阶段 | [2. 训练阶段](#2-训练阶段-training-stages) |
+| 精度与数值 | [3. 精度与数值](#3-精度与数值-precision--numerics) |
+| 性能优化 | [4. 性能优化](#4-性能优化-performance-optimization) |
+| 推理 | [5. 推理](#5-推理-inference) |
+| 硬件 | [6. 硬件](#6-硬件-hardware) |
+| 框架与工具 | [7. 框架与工具](#7-框架与工具-frameworks--tools) |
+
+---
+
 ## 1. 并行计算 (Parallel Computing)
 
 **TP** (Tensor Parallelism, 张量并行) — 将权重矩阵按列或按行切分到多卡，每卡计算部分结果后通过 AllReduce 聚合。相关: [AllReduce] [PP]。
