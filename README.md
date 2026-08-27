@@ -29,6 +29,22 @@ Training large-scale AI models is systems engineering at its hardest — combini
 | ⚡ | `performance/` | 5-step optimization workflow | Low throughput / OOM / Poor scaling efficiency |
 | 📋 | `tickets/` | Structured case archive retrieval | "Have we seen this before" / "Past cases" |
 
+## Scope
+
+This library covers:
+- ✅ Training parallelism strategies (TP/PP/DP/CP/EP/FSDP/ZeRO)
+- ✅ Precision issue diagnosis (loss NaN/spike/divergence, gradient explosion, etc.)
+- ✅ Performance optimization (throughput, memory, scaling efficiency)
+- ✅ RL training (GRPO/PPO, rollout, training-inference integration)
+- ✅ Inference optimization (KV Cache, quantization, speculative decoding)
+
+This library does **NOT** cover:
+- ❌ Model architecture design (MoE architecture selection, layer/dimension tuning)
+- ❌ Data engineering (data pipeline bugs, data quality assessment)
+- ❌ Hardware-level debugging (NPU/GPU kernel bugs, driver issues)
+- ❌ Deployment infrastructure (Kubernetes, networking, storage)
+- ❌ Multi-modal training specifics (vision encoders, cross-modal fusion)
+
 ---
 
 ## Architecture
