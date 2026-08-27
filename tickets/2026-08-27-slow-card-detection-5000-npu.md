@@ -20,6 +20,8 @@ created: 2026-08-27
 resolved: 2026-08-27
 related_tickets: []
 source_refs: []
+  # 无本地源码仓对应——本 ticket 根因为 HCCL 链路/散热硬件问题
+  # 详见 external_refs 中的攻坚手册笔记
 external_refs:
   - 小艺5000卡集群_疑难杂症攻坚手册.md
 ---

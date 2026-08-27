@@ -19,6 +19,8 @@ created: 2026-08-27
 resolved: 2026-08-27
 related_tickets: []
 source_refs: []
+  # 无本地源码仓对应——本 ticket 涉及 MindSpore 框架，非本地 6 仓范围
+  # 详见 external_refs 中的来源笔记
 external_refs:
   - 小艺5000卡集群_疑难杂症攻坚手册.md
 ---
