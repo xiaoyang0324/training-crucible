@@ -59,18 +59,18 @@ description: >
     │
     ├─ "什么是 X" / "X 怎么工作" / "X 和 Y 区别" ──────────────► 知识问答
     │     │
-    │     ├─ 含 pretrain / 预训练 / pre-training ────────► knowledge/pretraining.md (P1)
-    │     ├─ 含 SFT / DPO / RLHF / alignment / 后训练 ──► knowledge/post-training.md (P1)
-    │     ├─ 含 GRPO / PPO / RL / 强化学习 ──────────────► knowledge/rl.md (P1)
-    │     └─ 含 quant / KV cache / speculative / 推理 ───► knowledge/inference.md (P1)
+    │     ├─ 含 pretrain / 预训练 / pre-training ────────► knowledge/pretraining.md
+    │     ├─ 含 SFT / DPO / RLHF / alignment / 后训练 ──► knowledge/post-training.md
+    │     ├─ 含 GRPO / PPO / RL / 强化学习 ──────────────► knowledge/rl.md
+    │     └─ 含 quant / KV cache / speculative / 推理 ───► knowledge/inference.md
     │
     ├─ loss NaN / loss spike / 梯度爆炸 / 精度异常 / ──────► 精度诊断
     │     train-infer mismatch / 不收敛 / 发散                    │
-    │     └─ precision/SKILL.md (P2) + precision/references/
+    │     └─ precision/SKILL.md + precision/references/
     │
     ├─ 慢 / OOM / 吞吐低 / 扩展效率 / 内存瓶颈 / ──────────► 性能优化
     │     MFU 低 / 通信瓶颈 / 算子慢                            │
-    │     └─ performance/SKILL.md (P2) + performance/references/
+    │     └─ performance/SKILL.md + performance/references/
     │
     ├─ "遇到过吗" / "历史案例" / "之前的问题" ──────────────► 问题归档
     │     └─ tickets/ — 按 type/stage/tags 检索
