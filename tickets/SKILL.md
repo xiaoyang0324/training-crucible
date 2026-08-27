@@ -12,6 +12,7 @@ description: >
 
 1. 读取用户问题的关键词（症状、阶段、框架）
 2. 扫描 tickets/ 下所有 *.md 的 frontmatter（tags, type, stage）
+   - 排除 TEMPLATE.md 和 SKILL.md 本身（非 ticket 文件）
 3. 按匹配度排序返回，格式：`TICKET-ID — title（匹配标签: xxx）`
 
 ## 归档工作流
@@ -22,10 +23,11 @@ description: >
 - 用户明确要求归档
 
 步骤：
+0. 确定 id: 检查 tickets/ 中当天已有 ticket，递增 NNN（如已有 001-003，新 ticket 为 004）
 1. 复制 TEMPLATE.md → tickets/YYYY-MM-DD-<slug>.md
 2. 填写 frontmatter（id, type, stage, tags, source_refs）
 3. 填写 8 段正文（Symptom, Environment, Analysis, Root Cause, Resolution, Verification, Lessons, References）
-4. 检查 related_tickets 是否需要更新
+4. 双向回填 related_tickets：检查已有 ticket 是否也需指向本 ticket，同步更新
 
 ## 检索命令示例
 
