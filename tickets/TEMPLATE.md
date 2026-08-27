@@ -7,12 +7,16 @@ type: precision | performance | hybrid
 stage: pretraining | posttraining | rl | inference | cross-stage
 status: resolved | investigating | wontfix
 severity: critical | major | minor
+  # critical: 训练完全中断，数据丢失风险
+  # major:   功能受损但可继续训练
+  # minor:   轻微影响，可延后处理
 hardware:
   - NVIDIA-Ada                   # or MUSA, Ascend, CPU, agnostic
 frameworks:
   - Megatron-LM                  # or torchtitan, miles, slime, torchada, torch_musa
 tags:
   - loss-nan                     # examples: grad-explosion, throughput, oom, scaling-efficiency, train-infer-mismatch, accuracy-regression
+  # 优先使用已有 tags；新增 tags 参考 references/training-glossary.md
 created: YYYY-MM-DD
 resolved: YYYY-MM-DD             # leave blank if status != resolved
 related_tickets:
