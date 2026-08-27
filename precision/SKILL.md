@@ -1,5 +1,6 @@
 ---
-name: precision-expert
+# 子模块 frontmatter 仅作说明，不注册为独立 skill
+# 入口：SKILL.md 的意图路由表 → precision/SKILL.md
 description: >
   精度诊断专家——5 步诊断工作流，覆盖 loss NaN/spike/divergence、梯度爆炸、
   train-infer 不一致、精度回退等精度问题。

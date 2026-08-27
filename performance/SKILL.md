@@ -1,5 +1,6 @@
 ---
-name: performance-expert
+# 子模块 frontmatter 仅作说明，不注册为独立 skill
+# 入口：SKILL.md 的意图路由表 → performance/SKILL.md
 description: >
   性能优化专家——5 步优化工作流，覆盖吞吐低、OOM、MFU 低、扩展效率差、
   通信瓶颈等性能问题。
