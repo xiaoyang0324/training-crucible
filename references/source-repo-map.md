@@ -4,6 +4,28 @@
 > When answering a question, the skill cites the **local source repo** (file path + line number)
 > as primary evidence. External papers supplement, never replace, source evidence.
 
+## External Frameworks (外部知识，标注 `[外部]`)
+
+以下框架无本地源码仓（或不在 6 仓范围内），回答中引用时**必须标注 `[外部]`**，且不能作为主要证据。
+
+### DeepSpeed
+- **Source:** `C:\y30062407\workspace\local\面试\train\DeepSpeed`（如已克隆）
+- **Primary stages:** Pre-training, Post-training
+- **Key features:** ZeRO-1/2/3, ZeRO-Offload, DeepSpeed-MoE, pipeline parallelism
+- **When to cite:** ZeRO optimizer states partitioning, memory optimization techniques
+
+### vLLM
+- **Source:** 外部（未本地克隆）
+- **Primary stage:** Inference
+- **Key features:** PagedAttention, Continuous Batching, Tensor Parallelism serving
+- **When to cite:** Inference serving architecture, KV Cache management
+
+### SGLang
+- **Source:** 外部（未本地克隆，但 miles/slime 仓内有集成代码）
+- **Primary stage:** Inference (rollout generation)
+- **Key features:** RadixAttention, structured generation, RL rollout backend
+- **When to cite:** RL rollout generation, inference engine integration
+
 ## Hardware Coverage Note
 
 - **NVIDIA GPU** repos: Megatron-LM, torchtitan, miles, slime, torchada
@@ -141,3 +163,6 @@
 | MoE training | Megatron-LM | miles, slime |
 | Consumer GPU (Ada) | torchada | — |
 | MUSA GPU | torch_musa | — |
+| ZeRO / memory optimization | DeepSpeed | Megatron-LM, torchtitan |
+| Inference serving | vLLM | SGLang (via miles/slime) |
+| RL rollout backend | SGLang (via miles/slime) | vLLM |
