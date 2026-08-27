@@ -91,7 +91,7 @@
 【建议方案】
 ...
 
-【归档】→ 创建 ticket TICKET-xxx
+【归档】（如问题已解决且根因明确）→ 创建 ticket TICKET-xxx
 ```
 
 ### 性能优化类
@@ -111,5 +111,5 @@
 【预期收益】
 ...
 
-【归档】→ 创建 ticket TICKET-xxx
+【归档】（如问题已解决且根因明确）→ 创建 ticket TICKET-xxx
 ```
