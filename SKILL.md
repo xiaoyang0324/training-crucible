@@ -90,10 +90,12 @@ description: >
 | 精度, loss, 梯度, grad, NaN, spike, divergence, 不收敛 | `precision/` |
 | 性能, 吞吐, throughput, MFU, 内存, memory, OOM, 慢 | `performance/` |
 | 案例, 问题单, ticket, 归档, 历史 | `tickets/` |
-| Megatron, torchtitan, miles, slime, torchada, torch_musa | `references/source-repo-map.md` |
 | 训练不稳定, 模型训不动, loss 震荡, 不收敛 | `precision/` |
 | 显存不够用, 内存不够, 爆显存, 卡OOM | `performance/` |
 | 训练太慢, 速度上不去, GPU闲置 | `performance/` |
+
+> **注：** 框架关键词（Megatron/torchtitan/miles/slime/torchada/torch_musa）不单独路由。
+> 先按意图确定模块，再在模块内用框架关键词定位具体代码。详见 `references/source-repo-map.md`。
 
 > **兜底规则：** 如果用户问题不含上述关键词，根据问题语义判断意图。无法判断时主动询问用户。
 
