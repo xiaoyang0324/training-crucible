@@ -394,6 +394,6 @@
 
 ## 引用
 
-- `performance/SKILL.md` — 5 步优化工作流
-- `performance/references/bottleneck-taxonomy.md` — 性能瓶颈分类体系
-- `tickets/` — 历史案例库
+- `skill-performance/SKILL.md` — 5 步优化工作流
+- `skill-performance/references/bottleneck-taxonomy.md` — 性能瓶颈分类体系
+- `skill-tickets/` — 历史案例库

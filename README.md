@@ -28,10 +28,10 @@ Training large-scale AI models is systems engineering at its hardest — combini
 
 | | Module | What it does | When to use |
 |---|--------|--------------|-------------|
-| 📚 | `knowledge/` | Knowledge Q&A routed by training stage | "What is X" / "How does Y work" |
-| 🔬 | `precision/` | 5-step diagnostic workflow | Loss NaN / Gradient explosion / Accuracy regression |
-| ⚡ | `performance/` | 5-step optimization workflow | Low throughput / OOM / Poor scaling efficiency |
-| 📋 | `tickets/` | Structured case archive retrieval | "Have we seen this before" / "Past cases" |
+| 📚 | `skill-knowledge/` | Knowledge Q&A routed by training stage | "What is X" / "How does Y work" |
+| 🔬 | `skill-precision/` | 5-step diagnostic workflow | Loss NaN / Gradient explosion / Accuracy regression |
+| ⚡ | `skill-performance/` | 5-step optimization workflow | Low throughput / OOM / Poor scaling efficiency |
+| 📋 | `skill-tickets/` | Structured case archive retrieval | "Have we seen this before" / "Past cases" |
 
 ## Scope
 
@@ -56,22 +56,22 @@ This library does **NOT** cover:
 ```
 training-crucible/
 ├── SKILL.md                        # Entry router — Iron Law + intent recognition
-├── knowledge/                      # Knowledge expert
+├── skill-knowledge/                      # Knowledge expert
 │   ├── pretraining.md              #   Parallelism strategies, memory optimization
-│   ├── posttraining.md             #   SFT · DPO · RLHF
+│   ├── post-training.md             #   SFT · DPO · RLHF
 │   ├── rl.md                       #   GRPO · PPO · rollout generation
 │   └── inference.md                #   KV Cache · Quantization · Speculative decoding
-├── precision/                      # Precision expert
+├── skill-precision/                      # Precision expert
 │   ├── SKILL.md                    #   Capture → Classify → Localize → Hypothesize → Resolve
 │   └── references/                 #   Failure taxonomy · Known patterns
-├── performance/                    # Performance expert
+├── skill-performance/                    # Performance expert
 │   ├── SKILL.md                    #   Profile → Identify → Match → Adapt → Validate
 │   └── references/                 #   Bottleneck taxonomy · SOTA techniques
-├── tickets/                        # Problem archive
+├── skill-tickets/                        # Problem archive
 │   ├── SKILL.md                    #   Search & archive workflow
 │   ├── TEMPLATE.md                 #   YAML frontmatter + 8 body sections
 │   └── *.md                        #   Seed cases from real project experience
-└── references/                     # Shared references
+└── skill-references/                     # Shared references
     ├── source-repo-map.md          #   9 repos → stage mapping
     ├── training-glossary.md        #   90 canonical terms
     └── answer-conventions.md       #   Answer conventions + output templates
@@ -84,10 +84,10 @@ training-crucible/
 ```
 "Your question"
       │
-      ├─ Concept / How-it-works ──────► knowledge/ (sub-routed by stage)
-      ├─ Precision anomaly ───────────► precision/ (5-step diagnosis → archive)
-      ├─ Performance bottleneck ──────► performance/ (5-step optimization → archive)
-      ├─ Historical cases ────────────► tickets/ (filter by tags)
+      ├─ Concept / How-it-works ──────► skill-knowledge/ (sub-routed by stage)
+      ├─ Precision anomaly ───────────► skill-precision/ (5-step diagnosis → archive)
+      ├─ Performance bottleneck ──────► skill-performance/ (5-step optimization → archive)
+      ├─ Historical cases ────────────► skill-tickets/ (filter by tags)
       └─ Complex problem ─────────────► precision → performance → archive (chained)
 ```
 

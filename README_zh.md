@@ -29,10 +29,10 @@
 
 | | 模块 | 能力 | 触发场景 |
 |---|------|------|----------|
-| 📚 | `knowledge/` | 按训练阶段路由的知识问答 | "是什么" / "怎么工作" |
-| 🔬 | `precision/` | 5 步诊断工作流 | loss NaN / 梯度爆炸 / 精度回退 |
-| ⚡ | `performance/` | 5 步优化工作流 | 吞吐低 / OOM / 扩展效率差 |
-| 📋 | `tickets/` | 结构化案例库检索 | "遇到过吗" / "历史案例" |
+| 📚 | `skill-knowledge/` | 按训练阶段路由的知识问答 | "是什么" / "怎么工作" |
+| 🔬 | `skill-precision/` | 5 步诊断工作流 | loss NaN / 梯度爆炸 / 精度回退 |
+| ⚡ | `skill-performance/` | 5 步优化工作流 | 吞吐低 / OOM / 扩展效率差 |
+| 📋 | `skill-tickets/` | 结构化案例库检索 | "遇到过吗" / "历史案例" |
 
 ## 范围
 
@@ -57,22 +57,22 @@
 ```
 training-crucible/
 ├── SKILL.md                        # 入口路由 — Iron Law + 意图识别
-├── knowledge/                      # 知识专家
+├── skill-knowledge/                      # 知识专家
 │   ├── pretraining.md              #   并行策略、内存优化
-│   ├── posttraining.md             #   SFT · DPO · RLHF
+│   ├── post-training.md             #   SFT · DPO · RLHF
 │   ├── rl.md                       #   GRPO · PPO · rollout
 │   └── inference.md                #   KV Cache · 量化 · 投机解码
-├── precision/                      # 精度专家
+├── skill-precision/                      # 精度专家
 │   ├── SKILL.md                    #   捕获→分类→定位→假设→解决
 │   └── references/                 #   故障分类 · 已知模式
-├── performance/                    # 性能专家
+├── skill-performance/                    # 性能专家
 │   ├── SKILL.md                    #   画像→识别→匹配→适配→验证
 │   └── references/                 #   瓶颈分类 · SOTA 技术
-├── tickets/                        # 问题归档
+├── skill-tickets/                        # 问题归档
 │   ├── SKILL.md                    #   检索 & 归档工作流
 │   ├── TEMPLATE.md                 #   YAML frontmatter + 8 段正文
 │   └── *.md                        #   来自真实项目的种子案例
-└── references/                     # 共享参考
+└── skill-references/                     # 共享参考
     ├── source-repo-map.md          #   9 仓 → 阶段映射
     ├── training-glossary.md        #   90 个规范术语
     └── answer-conventions.md       #   回答规范 + 输出模板
@@ -85,10 +85,10 @@ training-crucible/
 ```
 "你的问题"
       │
-      ├─ 概念原理 ──────────────► knowledge/ (按阶段子路由)
-      ├─ 精度异常 ──────────────► precision/ (5 步诊断 → 归档)
-      ├─ 性能瓶颈 ──────────────► performance/ (5 步优化 → 归档)
-      ├─ 历史案例 ──────────────► tickets/ (按标签检索)
+      ├─ 概念原理 ──────────────► skill-knowledge/ (按阶段子路由)
+      ├─ 精度异常 ──────────────► skill-precision/ (5 步诊断 → 归档)
+      ├─ 性能瓶颈 ──────────────► skill-performance/ (5 步优化 → 归档)
+      ├─ 历史案例 ──────────────► skill-tickets/ (按标签检索)
       └─ 复杂问题 ──────────────► 精度 → 性能 → 归档 (串联)
 ```
 

@@ -225,6 +225,6 @@
 
 ## 引用
 
-- `precision/SKILL.md` — 5 步诊断工作流
-- `precision/references/failure-taxonomy.md` — 精度故障分类体系
-- `tickets/` — 历史案例库
+- `skill-precision/SKILL.md` — 5 步诊断工作流
+- `skill-precision/references/failure-taxonomy.md` — 精度故障分类体系
+- `skill-tickets/` — 历史案例库

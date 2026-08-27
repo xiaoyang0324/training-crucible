@@ -38,10 +38,10 @@ description: >
 
 | 能力 | 模块 | 说明 |
 |------|------|------|
-| **知识问答** | `knowledge/` | 按训练阶段路由，解释概念、架构、配置 |
-| **精度诊断** | `precision/` | 5 步工作流诊断 loss/梯度/收敛问题 |
-| **性能优化** | `performance/` | 5 步工作流优化吞吐/内存/扩展效率 |
-| **问题归档** | `tickets/` | 结构化案例库，按症状/阶段/框架检索 |
+| **知识问答** | `skill-knowledge/` | 按训练阶段路由，解释概念、架构、配置 |
+| **精度诊断** | `skill-precision/` | 5 步工作流诊断 loss/梯度/收敛问题 |
+| **性能优化** | `skill-performance/` | 5 步工作流优化吞吐/内存/扩展效率 |
+| **问题归档** | `skill-tickets/` | 结构化案例库，按症状/阶段/框架检索 |
 
 ---
 
@@ -59,43 +59,43 @@ description: >
     │
     ├─ "什么是 X" / "X 怎么工作" / "X 和 Y 区别" ──────────────► 知识问答
     │     │
-    │     ├─ 含 pretrain / 预训练 / pre-training ────────► knowledge/pretraining.md
-    │     ├─ 含 SFT / DPO / RLHF / alignment / 后训练 ──► knowledge/post-training.md
-    │     ├─ 含 GRPO / PPO / RL / 强化学习 ──────────────► knowledge/rl.md
-    │     └─ 含 quant / KV cache / speculative / 推理 ───► knowledge/inference.md
+    │     ├─ 含 pretrain / 预训练 / pre-training ────────► skill-knowledge/pretraining.md
+    │     ├─ 含 SFT / DPO / RLHF / alignment / 后训练 ──► skill-knowledge/post-training.md
+    │     ├─ 含 GRPO / PPO / RL / 强化学习 ──────────────► skill-knowledge/rl.md
+    │     └─ 含 quant / KV cache / speculative / 推理 ───► skill-knowledge/inference.md
     │
     ├─ loss NaN / loss spike / 梯度爆炸 / 精度异常 / ──────► 精度诊断
     │     train-infer mismatch / 不收敛 / 发散                    │
-    │     └─ precision/SKILL.md + precision/references/
+    │     └─ skill-precision/SKILL.md + skill-precision/references/
     │
     ├─ 慢 / OOM / 吞吐低 / 扩展效率 / 内存瓶颈 / ──────────► 性能优化
     │     MFU 低 / 通信瓶颈 / 算子慢                            │
-    │     └─ performance/SKILL.md + performance/references/
+    │     └─ skill-performance/SKILL.md + skill-performance/references/
     │
     ├─ "遇到过吗" / "历史案例" / "之前的问题" ──────────────► 问题归档
-    │     └─ tickets/ — 按 type/stage/tags 检索
+    │     └─ skill-tickets/ — 按 type/stage/tags 检索
     │
     └─ 复杂问题（精度+性能+归档） ──────────────────────────► 串联：
-         精度诊断 → 性能分析 → 归档到 tickets/
+         精度诊断 → 性能分析 → 归档到 skill-tickets/
 ```
 
 ### 关键词触发表
 
 | 关键词 | 路由目标 |
 |--------|----------|
-| 预训练, pretrain, pre-training, 预训练阶段 | `knowledge/pretraining.md` |
-| 后训练, SFT, DPO, RLHF, alignment, 对齐 | `knowledge/post-training.md` |
-| 强化学习, GRPO, PPO, RL, reinforcement | `knowledge/rl.md` |
-| 推理, quant, KV cache, speculative, serving, 量化 | `knowledge/inference.md` |
-| 精度, loss, 梯度, grad, NaN, spike, divergence, 不收敛 | `precision/` |
-| 性能, 吞吐, throughput, MFU, 内存, memory, OOM, 慢 | `performance/` |
-| 案例, 问题单, ticket, 归档, 历史 | `tickets/` |
-| 训练不稳定, 模型训不动, loss 震荡, 不收敛 | `precision/` |
-| 显存不够用, 内存不够, 爆显存, 卡OOM | `performance/` |
-| 训练太慢, 速度上不去, GPU闲置 | `performance/` |
+| 预训练, pretrain, pre-training, 预训练阶段 | `skill-knowledge/pretraining.md` |
+| 后训练, SFT, DPO, RLHF, alignment, 对齐 | `skill-knowledge/post-training.md` |
+| 强化学习, GRPO, PPO, RL, reinforcement | `skill-knowledge/rl.md` |
+| 推理, quant, KV cache, speculative, serving, 量化 | `skill-knowledge/inference.md` |
+| 精度, loss, 梯度, grad, NaN, spike, divergence, 不收敛 | `skill-precision/` |
+| 性能, 吞吐, throughput, MFU, 内存, memory, OOM, 慢 | `skill-performance/` |
+| 案例, 问题单, ticket, 归档, 历史 | `skill-tickets/` |
+| 训练不稳定, 模型训不动, loss 震荡, 不收敛 | `skill-precision/` |
+| 显存不够用, 内存不够, 爆显存, 卡OOM | `skill-performance/` |
+| 训练太慢, 速度上不去, GPU闲置 | `skill-performance/` |
 
 > **注：** 框架关键词（Megatron/torchtitan/miles/slime/torchada/torch_musa）不单独路由。
-> 先按意图确定模块，再在模块内用框架关键词定位具体代码。详见 `references/source-repo-map.md`。
+> 先按意图确定模块，再在模块内用框架关键词定位具体代码。详见 `skill-references/source-repo-map.md`。
 
 > **兜底规则：** 如果用户问题不含上述关键词，根据问题语义判断意图。无法判断时主动询问用户。
 
@@ -104,9 +104,9 @@ description: >
 ## 源码仓路由 & 回答规范
 
 > 详见：
-> - `references/source-repo-map.md` — 源码仓 → 阶段映射
-> - `references/answer-conventions.md` — 回答规范与输出格式模板
-> - `references/training-glossary.md` — 规范术语表
+> - `skill-references/source-repo-map.md` — 源码仓 → 阶段映射
+> - `skill-references/answer-conventions.md` — 回答规范与输出格式模板
+> - `skill-references/training-glossary.md` — 规范术语表
 
 ---
 
@@ -114,10 +114,10 @@ description: >
 
 | 模块 | 路径 | 说明 |
 |------|------|------|
-| 知识专家 | `knowledge/` | 按训练阶段分 4 个文件 |
-| 精度专家 | `precision/` | 5 步诊断工作流 + 精度故障分类 |
-| 性能专家 | `performance/` | 5 步优化工作流 + SOTA 技术目录 |
-| 问题归档 | `tickets/` | 检索 & 归档工作流 |
-| 源码映射 | `references/source-repo-map.md` | 外部仓 → 阶段映射 |
-| 术语表 | `references/training-glossary.md` | 规范术语 |
-| 回答规范 | `references/answer-conventions.md` | 输出格式模板 + 引用规则 |
+| 知识专家 | `skill-knowledge/` | 按训练阶段分 4 个文件 |
+| 精度专家 | `skill-precision/` | 5 步诊断工作流 + 精度故障分类 |
+| 性能专家 | `skill-performance/` | 5 步优化工作流 + SOTA 技术目录 |
+| 问题归档 | `skill-tickets/` | 检索 & 归档工作流 |
+| 源码映射 | `skill-references/source-repo-map.md` | 外部仓 → 阶段映射 |
+| 术语表 | `skill-references/training-glossary.md` | 规范术语 |
+| 回答规范 | `skill-references/answer-conventions.md` | 输出格式模板 + 引用规则 |

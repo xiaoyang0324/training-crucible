@@ -1,6 +1,6 @@
 ---
 # 子模块 frontmatter 仅作说明，不注册为独立 skill
-# 入口：SKILL.md 的意图路由表 → performance/SKILL.md
+# 入口：SKILL.md 的意图路由表 → skill-performance/SKILL.md
 description: >
   性能优化专家——5 步优化工作流，覆盖吞吐低、OOM、MFU 低、扩展效率差、
   通信瓶颈等性能问题。
@@ -42,9 +42,9 @@ description: >
 
 1. **画像 (Profile)** — 收集性能指标 (吞吐/MFU/内存/步长)、comm/compute ratio、kernel 耗时分布、环境信息
 2. **识别 (Identify)** — 分类瓶颈 (compute/memory/communication/I/O/launch-bound)，定位热点算子/层/操作
-3. **匹配 (Match)** — 匹配 `references/sota-techniques.md` SOTA 技术，检索 `tickets/` 类似案例，按预期收益排序候选技术
+3. **匹配 (Match)** — 匹配 `skill-performance/references/sota-techniques.md` SOTA 技术，检索 `skill-tickets/` 类似案例，按预期收益排序候选技术
 4. **适配 (Adapt)** — 根据用户硬件/框架调整方案，引用源码仓具体实现，给出配置参数建议
-5. **验证与归档 (Validate & Archive)** — 提出预期加速比/内存节省量，验证指标改善，归档到 `tickets/`
+5. **验证与归档 (Validate & Archive)** — 提出预期加速比/内存节省量，验证指标改善，归档到 `skill-tickets/`
 
 ---
 
@@ -90,8 +90,8 @@ description: >
 ### Step 3: 匹配 (Match)
 
 **匹配 SOTA 技术：**
-- 查阅 `performance/references/sota-techniques.md`
-- 检索 `tickets/` 中 `type: performance` 的历史案例
+- 查阅 `skill-performance/references/sota-techniques.md`
+- 检索 `skill-tickets/` 中 `type: performance` 的历史案例
 - 按预期收益排序候选技术
 
 **常见技术映射：**
@@ -124,7 +124,7 @@ description: >
 - 验证优化在目标硬件上稳定
 
 **归档要求：**
-- 按 `tickets/TEMPLATE.md` 格式创建 ticket
+- 按 `skill-tickets/TEMPLATE.md` 格式创建 ticket
 - 记录优化前后对比数据
 - 引用源码路径和配置变更
 
@@ -134,7 +134,7 @@ description: >
 
 | 文件 | 内容 |
 |------|------|
-| `performance/references/bottleneck-taxonomy.md` | 性能瓶颈分类体系 |
-| `performance/references/sota-techniques.md` | SOTA 优化技术目录 |
-| `tickets/TEMPLATE.md` | 问题归档模板 |
-| `references/source-repo-map.md` | 源码仓路由（用于定位代码引用） |
+| `skill-performance/references/bottleneck-taxonomy.md` | 性能瓶颈分类体系 |
+| `skill-performance/references/sota-techniques.md` | SOTA 优化技术目录 |
+| `skill-tickets/TEMPLATE.md` | 问题归档模板 |
+| `skill-references/source-repo-map.md` | 源码仓路由（用于定位代码引用） |

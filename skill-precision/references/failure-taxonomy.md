@@ -130,6 +130,6 @@
 
 ## 引用
 
-- `precision/SKILL.md` — 5 步诊断工作流
-- `precision/references/known-patterns.md` — 已知精度问题模式库（含源码引用）
-- `tickets/` — 历史案例库（按 `type: precision` 检索）
+- `skill-precision/SKILL.md` — 5 步诊断工作流
+- `skill-precision/references/known-patterns.md` — 已知精度问题模式库（含源码引用）
+- `skill-tickets/` — 历史案例库（按 `type: precision` 检索）

@@ -20,7 +20,7 @@
 | vLLM | 外部知识 | 标注 `[外部]` |
 | SGLang | 外部知识 | 标注 `[外部]` |
 
-> 详细映射见 `references/source-repo-map.md`。
+> 详细映射见 `skill-references/source-repo-map.md`。
 
 ---
 
@@ -28,17 +28,17 @@
 
 ### 精度 + 性能联合分析
 当问题同时涉及精度和性能（如"开启 activation recompute 后 loss 异常"）：
-1. 先走 `precision/` 诊断流程，确认精度问题根因
-2. 再走 `performance/` 优化流程，评估性能影响
-3. 最终结论归档到 `tickets/`
+1. 先走 `skill-precision/` 诊断流程，确认精度问题根因
+2. 再走 `skill-performance/` 优化流程，评估性能影响
+3. 最终结论归档到 `skill-tickets/`
 
 ### 知识 + 归档联动
 当知识问答中发现类似历史案例：
-1. 在 `knowledge/` 回答后，主动检索 `tickets/` 中 `related_tickets`
+1. 在 `skill-knowledge/` 回答后，主动检索 `skill-tickets/` 中 `related_tickets`
 2. 如有匹配，附上"类似案例：TICKET-..."
 
 ### 归档触发条件
-以下情况必须归档到 `tickets/`：
+以下情况必须归档到 `skill-tickets/`：
 - 精度问题已解决且根因明确
 - 性能优化已完成且有量化收益
 - 跨模块的复杂问题

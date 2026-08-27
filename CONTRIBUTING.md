@@ -6,7 +6,7 @@
 
 ## 添加新 Ticket
 
-1. 复制 `tickets/TEMPLATE.md` → `tickets/YYYY-MM-DD-<slug>.md`
+1. 复制 `skill-tickets/TEMPLATE.md` → `skill-tickets/YYYY-MM-DD-<slug>.md`
 2. 分配 id: `TICKET-YYYYMMDD-NNN`（检查当天已有 ticket，递增 NNN）
 3. 填写 frontmatter：
    - `type`: precision | performance | hybrid
@@ -14,22 +14,22 @@
    - `severity`: critical（训练中断）| major（功能受损）| minor（轻微影响）
    - `hardware`: NVIDIA-Ada | MUSA | Ascend | CPU | agnostic
    - `frameworks`: Megatron-LM | torchtitan | miles | slime | torchada | torch_musa | torch_npu | MindSpeed
-   - `tags`: 优先使用已有 tags，新增 tags 参考 `references/training-glossary.md`
+   - `tags`: 优先使用已有 tags，新增 tags 参考 `skill-references/training-glossary.md`
 4. 填写 8 段正文（Symptom / Environment / Analysis / Root Cause / Resolution / Verification / Lessons / References）
 5. 检查已有 ticket 是否需要更新 `related_tickets`
 6. Commit: `docs(tickets): add ticket for <short-description>`
 
 ## 添加新 Source Repo
 
-1. 在 `references/source-repo-map.md` 中添加新 repo 章节
+1. 在 `skill-references/source-repo-map.md` 中添加新 repo 章节
 2. 包含：Path、Primary stages、Key directories、When to cite
 3. 在 Quick Routing Index 表格中添加相关条目
-4. 同步更新 `references/answer-conventions.md` 的源码仓路由表
+4. 同步更新 `skill-references/answer-conventions.md` 的源码仓路由表
 5. Commit: `docs(references): add <repo-name> to source repo map`
 
 ## 添加新术语到 Glossary
 
-1. 在 `references/training-glossary.md` 对应类别中添加术语
+1. 在 `skill-references/training-glossary.md` 对应类别中添加术语
 2. 格式：`**ENG** (中文) — 定义。相关: [term1] [term2]。`
 3. Commit: `docs(glossary): add <term>`
 
@@ -70,7 +70,7 @@
 
 - 全小写，横线分隔
 - 优先使用已有 tags，避免近义词重复（用 `loss-divergence` 而非 `loss-diverge`）
-- 新增 tags 先在 `references/training-glossary.md` 中添加定义
+- 新增 tags 先在 `skill-references/training-glossary.md` 中添加定义
 - 常见 tag 类别：
   - 症状类: `loss-nan`, `loss-spike`, `grad-explosion`, `oom`
   - 技术类: `fp8`, `graph-capture`, `activation-recompute`

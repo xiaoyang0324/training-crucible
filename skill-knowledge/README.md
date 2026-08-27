@@ -9,7 +9,7 @@
 | File | Stage | Core Content |
 |------|-------|--------------|
 | `pretraining.md` | Pre-training | Parallelism (TP/PP/DP/CP/EP), memory optimization, config knobs |
-| `posttraining.md` | Post-training | SFT / DPO / RLHF principles and configuration |
+| `post-training.md` | Post-training | SFT / DPO / RLHF principles and configuration |
 | `rl.md` | Reinforcement Learning | GRPO / PPO, rollout generation, training-inference integration |
 | `inference.md` | Inference | KV Cache, quantization, speculative decoding, serving |
 
@@ -27,4 +27,4 @@ Answers include: core concepts, source citations, architecture diagrams, config 
 
 ## Source References
 
-See `references/source-repo-map.md` for the full source repo mapping.
+See `skill-references/source-repo-map.md` for the full source repo mapping.

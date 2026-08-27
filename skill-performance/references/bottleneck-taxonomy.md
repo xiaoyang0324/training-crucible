@@ -229,6 +229,6 @@
 
 ## 引用
 
-- `performance/SKILL.md` — 5 步优化工作流
-- `performance/references/sota-techniques.md` — SOTA 优化技术目录（含源码引用）
-- `tickets/` — 历史案例库（按 `type: performance` 检索）
+- `skill-performance/SKILL.md` — 5 步优化工作流
+- `skill-performance/references/sota-techniques.md` — SOTA 优化技术目录（含源码引用）
+- `skill-tickets/` — 历史案例库（按 `type: performance` 检索）

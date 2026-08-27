@@ -16,7 +16,7 @@ frameworks:
   - Megatron-LM                  # or torchtitan, miles, slime, torchada, torch_musa
 tags:
   - loss-nan                     # examples: grad-explosion, throughput, oom, scaling-efficiency, train-infer-mismatch, accuracy-regression
-  # 优先使用已有 tags；新增 tags 参考 references/training-glossary.md
+  # 优先使用已有 tags；新增 tags 参考 skill-references/training-glossary.md
 created: YYYY-MM-DD
 resolved: YYYY-MM-DD             # leave blank if status != resolved
 related_tickets:
@@ -75,9 +75,9 @@ How we confirmed the fix worked:
 ## Lessons
 
 Reusable insight. Cross-references:
-- See `references/source-repo-map.md` for related repos
-- See `precision/references/` for precision patterns (coming in P2)
-- See `performance/references/` for perf techniques (coming in P2)
+- See `skill-references/source-repo-map.md` for related repos
+- See `skill-precision/references/` for precision patterns
+- See `skill-performance/references/` for perf techniques
 
 ## References
 

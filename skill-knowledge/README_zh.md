@@ -9,7 +9,7 @@
 | 文件 | 阶段 | 核心内容 |
 |------|------|----------|
 | `pretraining.md` | 预训练 | 并行策略 (TP/PP/DP/CP/EP)、内存优化、配置参数 |
-| `posttraining.md` | 后训练 | SFT / DPO / RLHF 原理与配置 |
+| `post-training.md` | 后训练 | SFT / DPO / RLHF 原理与配置 |
 | `rl.md` | 强化学习 | GRPO / PPO、rollout 生成、训推一体 |
 | `inference.md` | 推理优化 | KV Cache、量化、投机解码、推理服务 |
 
@@ -27,4 +27,4 @@
 
 ## 源码参考
 
-详见 `references/source-repo-map.md`。
+详见 `skill-references/source-repo-map.md`。

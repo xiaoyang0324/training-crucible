@@ -33,8 +33,8 @@ Capture → Classify → Localize → Hypothesize → Resolve & Archive
 
 1. **Symptoms first, then judgment** — no analysis without full error + environment info
 2. **Layer-by-layer localization** — data → optimizer → gradient → activation → weight → loss
-3. **Match known patterns** — check `known-patterns.md` and `tickets/` first
-4. **Archive after fix** — resolved issues must be archived to `tickets/`
+3. **Match known patterns** — check `known-patterns.md` and `skill-tickets/` first
+4. **Archive after fix** — resolved issues must be archived to `skill-tickets/`
 
 ## Patterns Covered
 

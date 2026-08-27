@@ -1,6 +1,6 @@
 ---
 # 子模块 frontmatter 仅作说明，不注册为独立 skill
-# 入口：SKILL.md 的意图路由表 → precision/SKILL.md
+# 入口：SKILL.md 的意图路由表 → skill-precision/SKILL.md
 description: >
   精度诊断专家——5 步诊断工作流，覆盖 loss NaN/spike/divergence、梯度爆炸、
   train-infer 不一致、精度回退等精度问题。
@@ -42,8 +42,8 @@ description: >
 1. **捕获 (Capture)** — 收集错误消息、训练曲线快照 (loss/grad norm/lr)、环境信息 (模型/并行/硬件/框架)、变更历史
 2. **分类 (Classify)** — 归类症状 (NaN/Spike/Divergence/GradExplosion/TrainInferMismatch/AccuracyRegression)，判断首次出现步数 & 可复现性
 3. **定位 (Localize)** — 逐层排查：数据 → 优化器 → 梯度 → 激活 → 权重 → loss 计算，对比正常/异常步的中间值
-4. **假设 (Hypothesize)** — 匹配 `references/known-patterns.md` 已知模式，检索 `tickets/` 类似案例，按概率排序列出候选根因
-5. **解决与归档 (Resolve & Archive)** — 提出修复方案 (配置调整/代码patch/流程变更)，验证指标恢复正常，归档到 `tickets/`
+4. **假设 (Hypothesize)** — 匹配 `skill-precision/references/known-patterns.md` 已知模式，检索 `skill-tickets/` 类似案例，按概率排序列出候选根因
+5. **解决与归档 (Resolve & Archive)** — 提出修复方案 (配置调整/代码patch/流程变更)，验证指标恢复正常，归档到 `skill-tickets/`
 
 ---
 
@@ -111,8 +111,8 @@ description: >
 ### Step 4: 假设 (Hypothesize)
 
 **匹配已知模式：**
-- 查阅 `precision/references/known-patterns.md`，匹配症状
-- 检索 `tickets/` 中 `type: precision` 的历史案例
+- 查阅 `skill-precision/references/known-patterns.md`，匹配症状
+- 检索 `skill-tickets/` 中 `type: precision` 的历史案例
 - 按概率排序列出候选根因
 
 **常见候选根因：**
@@ -136,7 +136,7 @@ description: >
 - 对比修复前后指标曲线
 
 **归档要求：**
-- 按 `tickets/TEMPLATE.md` 格式创建 ticket
+- 按 `skill-tickets/TEMPLATE.md` 格式创建 ticket
 - 填写完整：Symptom / Environment / Analysis / Root Cause / Resolution / Verification
 - 引用真实源码路径作为 `source_refs`
 
@@ -146,7 +146,7 @@ description: >
 
 | 文件 | 内容 |
 |------|------|
-| `precision/references/failure-taxonomy.md` | 精度故障分类（按症状 / 阶段 / 层级） |
-| `precision/references/known-patterns.md` | 已知精度问题模式库 |
-| `tickets/TEMPLATE.md` | 问题归档模板 |
-| `references/source-repo-map.md` | 源码仓路由（用于定位代码引用） |
+| `skill-precision/references/failure-taxonomy.md` | 精度故障分类（按症状 / 阶段 / 层级） |
+| `skill-precision/references/known-patterns.md` | 已知精度问题模式库 |
+| `skill-tickets/TEMPLATE.md` | 问题归档模板 |
+| `skill-references/source-repo-map.md` | 源码仓路由（用于定位代码引用） |
