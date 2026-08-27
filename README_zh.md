@@ -1,13 +1,13 @@
-# training-crucible
-
 [中文](README_zh.md) | [English](README.md)
 
-> Forging full-stack AI training expertise under fire.
+# training-crucible
+
 > 在熔炉中锻造 AI 训练全栈精度。
+> Forging full-stack AI training expertise under fire.
 
-**Precision diagnostics, performance optimization, and a living problem archive — spanning pre-training, post-training, RL, and inference.**
+**精度诊断、性能优化、问题归档——覆盖预训练、后训练、强化学习、推理优化四大阶段。**
 
-精度诊断、性能优化、问题归档——覆盖预训练、后训练、强化学习、推理优化四大阶段。
+Precision diagnostics, performance optimization, and a living problem archive — spanning pre-training, post-training, RL, and inference.
 
 ---
 

@@ -1,28 +1,30 @@
-# 知识专家 (Knowledge Expert)
+[中文](README_zh.md) | [English](README.md)
 
-> 回答"是什么"和"怎么工作"——按训练阶段路由的知识问答模块。
+# Knowledge Expert
 
-## 覆盖阶段
+> Answers "what is X" and "how does Y work" — knowledge Q&A module routed by training stage.
 
-| 文件 | 阶段 | 核心内容 |
-|------|------|----------|
-| `pretraining.md` | 预训练 | 并行策略 (TP/PP/DP/CP/EP)、内存优化、配置参数 |
-| `posttraining.md` | 后训练 | SFT / DPO / RLHF 原理与配置 |
-| `rl.md` | 强化学习 | GRPO / PPO、rollout 生成、训推一体 |
-| `inference.md` | 推理优化 | KV Cache、量化、投机解码、推理服务 |
+## Stages Covered
 
-## 使用方式
+| File | Stage | Core Content |
+|------|-------|--------------|
+| `pretraining.md` | Pre-training | Parallelism (TP/PP/DP/CP/EP), memory optimization, config knobs |
+| `posttraining.md` | Post-training | SFT / DPO / RLHF principles and configuration |
+| `rl.md` | Reinforcement Learning | GRPO / PPO, rollout generation, training-inference integration |
+| `inference.md` | Inference | KV Cache, quantization, speculative decoding, serving |
 
-当用户问"是什么"或"怎么工作"类问题时，SKILL.md 路由到对应阶段的知识文件。
-回答包含：核心概念、源码引用、架构图、配置参数表、常见误区。
+## How It Works
 
-## 内容规范
+When the user asks "what is X" or "how does Y work", SKILL.md routes to the corresponding stage file.
+Answers include: core concepts, source citations, architecture diagrams, config tables, common misconceptions.
 
-- 中文撰写，英文术语在括号中标注
-- 每个技术主张必须引用本地源码仓（文件路径）
-- 包含 ASCII 架构图、配置参数表、常见误区
-- 文末附源码文件索引表
+## Content Standards
 
-## 源码参考
+- Chinese language (English terms in parentheses)
+- Every technical claim cites a local source repo (file path)
+- Includes ASCII architecture diagrams, config parameter tables, common misconceptions
+- Ends with a source file index table
 
-详见 `references/source-repo-map.md`。
+## Source References
+
+See `references/source-repo-map.md` for the full source repo mapping.
