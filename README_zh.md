@@ -49,11 +49,13 @@ training-crucible/
 │   ├── SKILL.md                    #   画像→识别→匹配→适配→验证
 │   └── references/                 #   瓶颈分类 · SOTA 技术
 ├── tickets/                        # 问题归档
+│   ├── SKILL.md                    #   检索 & 归档工作流
 │   ├── TEMPLATE.md                 #   YAML frontmatter + 8 段正文
 │   └── *.md                        #   来自真实项目的种子案例
 └── references/                     # 共享参考
-    ├── source-repo-map.md          #   6 仓 → 阶段映射
-    └── training-glossary.md        #   90 个规范术语
+    ├── source-repo-map.md          #   9 仓 → 阶段映射
+    ├── training-glossary.md        #   90 个规范术语
+    └── answer-conventions.md       #   回答规范 + 输出模板
 ```
 
 ---
@@ -94,8 +96,8 @@ training-crucible/
 | 知识专家 | 4 | 853 | 4 阶段知识问答 |
 | 精度专家 | 3 | 567 | 5 步诊断 + 故障分类 + 已知模式 |
 | 性能专家 | 3 | 822 | 5 步优化 + 瓶颈分类 + SOTA 技术 |
-| 问题归档 | 6 | 457 | 模板 + 5 个种子 ticket |
-| 共享参考 | 2 | 276 | 源码映射 + 术语表 |
+| 问题归档 | 7 | ~490 | 模板 + SKILL.md + 5 个种子 ticket |
+| 共享参考 | 3 | ~391 | 源码映射 + 术语表 + 回答规范 |
 
 ---
 

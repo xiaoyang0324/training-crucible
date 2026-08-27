@@ -48,11 +48,13 @@ training-crucible/
 │   ├── SKILL.md                    #   Profile → Identify → Match → Adapt → Validate
 │   └── references/                 #   Bottleneck taxonomy · SOTA techniques
 ├── tickets/                        # Problem archive
+│   ├── SKILL.md                    #   Search & archive workflow
 │   ├── TEMPLATE.md                 #   YAML frontmatter + 8 body sections
 │   └── *.md                        #   Seed cases from real project experience
 └── references/                     # Shared references
-    ├── source-repo-map.md          #   6 repos → stage mapping
-    └── training-glossary.md        #   90 canonical terms
+    ├── source-repo-map.md          #   9 repos → stage mapping
+    ├── training-glossary.md        #   90 canonical terms
+    └── answer-conventions.md       #   Answer conventions + output templates
 ```
 
 ---
@@ -93,8 +95,8 @@ Every technical claim cites a **local source repo** (file path + line number) as
 | Knowledge | 4 | 853 | 4-stage knowledge Q&A |
 | Precision | 3 | 567 | 5-step diagnosis + failure taxonomy + known patterns |
 | Performance | 3 | 822 | 5-step optimization + bottleneck taxonomy + SOTA techniques |
-| Tickets | 6 | 457 | Template + 5 seed cases |
-| References | 2 | 276 | Source repo map + glossary |
+| Tickets | 7 | ~490 | Template + SKILL.md + 5 seed cases |
+| References | 3 | ~391 | Source repo map + glossary + answer conventions |
 
 ---
 
