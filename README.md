@@ -123,14 +123,15 @@ Every technical claim cites a **local source repo** (file path + line number) as
 ## Roadmap
 
 ```
-P0 Skeleton     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅
-P1 Knowledge    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅
-P2 Experts      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅
-P3 Tickets      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅
-P4 References   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅
-P5 New repos    ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
-P6 Practice     ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
-P7 Team scale   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+v1.0 (Current)  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅
+  Skeleton · Knowledge · Experts · Tickets · References
+  Structure hardening · Naming conventions · CONTRIBUTING
+
+v1.1 (Next)     ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+  Citation audit · More seed tickets · Coverage gaps
+
+v2.0 (Future)   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+  New hardware repos (Ascend/MUSA) · Team workflows
 ```
 
 ---
