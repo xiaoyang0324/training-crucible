@@ -60,7 +60,7 @@ description: >
     ├─ "什么是 X" / "X 怎么工作" / "X 和 Y 区别" ──────────────► 知识问答
     │     │
     │     ├─ 含 pretrain / 预训练 / pre-training ────────► knowledge/pretraining.md (P1)
-    │     ├─ 含 SFT / DPO / RLHF / alignment / 后训练 ──► knowledge/posttraining.md (P1)
+    │     ├─ 含 SFT / DPO / RLHF / alignment / 后训练 ──► knowledge/post-training.md (P1)
     │     ├─ 含 GRPO / PPO / RL / 强化学习 ──────────────► knowledge/rl.md (P1)
     │     └─ 含 quant / KV cache / speculative / 推理 ───► knowledge/inference.md (P1)
     │
@@ -84,7 +84,7 @@ description: >
 | 关键词 | 路由目标 |
 |--------|----------|
 | 预训练, pretrain, pre-training, 预训练阶段 | `knowledge/pretraining.md` |
-| 后训练, SFT, DPO, RLHF, alignment, 对齐 | `knowledge/posttraining.md` |
+| 后训练, SFT, DPO, RLHF, alignment, 对齐 | `knowledge/post-training.md` |
 | 强化学习, GRPO, PPO, RL, reinforcement | `knowledge/rl.md` |
 | 推理, quant, KV cache, speculative, serving, 量化 | `knowledge/inference.md` |
 | 精度, loss, 梯度, grad, NaN, spike, divergence, 不收敛 | `precision/` |
