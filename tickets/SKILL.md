@@ -1,5 +1,6 @@
 ---
-name: ticket-archive
+# 子模块 frontmatter 仅作说明，不注册为独立 skill
+# 入口：SKILL.md 的意图路由表 → tickets/SKILL.md
 description: >
   问题归档与检索模块——按症状/阶段/框架检索历史案例，
   或将已解决的精度/性能问题归档为新 ticket。
