@@ -8,6 +8,10 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/version-v1.0.0-blue" alt="version">
+</p>
+
+<p align="center">
   <b>预训练</b> · <b>后训练</b> · <b>强化学习</b> · <b>推理优化</b>
 </p>
 

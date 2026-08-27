@@ -7,6 +7,10 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/version-v1.0.0-blue" alt="version">
+</p>
+
+<p align="center">
   <b>Pre-training</b> · <b>Post-training</b> · <b>Reinforcement Learning</b> · <b>Inference</b>
 </p>
 
