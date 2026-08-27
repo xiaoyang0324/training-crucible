@@ -159,3 +159,8 @@ global_batch_size = micro_batch_size × DP × gradient_accumulation_steps
 | `torchtitan/torchtitan/distributed/context_parallel/` | CP 实现 |
 | `torchtitan/torchtitan/distributed/activation_checkpoint.py` | 激活检查点（重算） |
 | `torchtitan/torchtitan/distributed/fsdp.py` | FSDP 数据并行实现 |
+
+## 相关案例
+
+- TICKET-20260827-004 — PP+TP 混合并行下图捕获 stream 冲突导致失败
+- TICKET-20260827-002 — 5000 卡集群快慢卡导致周期性掉速 30-50%

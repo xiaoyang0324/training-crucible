@@ -264,3 +264,8 @@ SGLang 是高性能推理框架，支持 RadixAttention、压缩状态管理：
 | `slime/slime/rollout/sglang_rollout.py` | SGLang rollout 实现 |
 | `slime/slime/backends/sglang_utils/` | SGLang 后端集成 |
 | `torchtitan/torchtitan/distributed/fsdp.py` | FSDP 推理支持 |
+
+## 相关案例
+
+- TICKET-20260827-005 — 美团推理 TND 布局下 dropout 无法入图
+- TICKET-20260827-004 — PP+TP 混合并行下图捕获 stream 冲突

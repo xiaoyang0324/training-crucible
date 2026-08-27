@@ -254,3 +254,7 @@ RL 训练中 rollout 需要高效推理引擎生成回答，SGLang 是主流选�
 | `torchtitan/torchtitan/experiments/rl/losses/` | GRPO/PPO 损失函数 |
 | `torchtitan/torchtitan/experiments/rl/rollout/` | Rollout 实现 |
 | `torchtitan/torchtitan/experiments/rl/actors/` | Actor 实现 |
+
+## 相关案例
+
+- TICKET-20260827-001 — FP8 模型入图后 loss 发散（RL 训练中也涉及图模式）

@@ -168,3 +168,8 @@ final_reward = reward_model_score - β × KL_divergence
 | `slime/slime/rollout/sft_rollout.py` | SFT rollout 实现 |
 | `miles/miles/true_on_policy/` | 在线策略训练框架 |
 | `torchtitan/torchtitan/experiments/rl/losses/` | RL 损失函数实现 |
+
+## 相关案例
+
+- TICKET-20260827-001 — FP8 模型入图后 loss 发散——scaling factor 被冻住
+- TICKET-20260827-003 — MindSpore RMSNorm epsilon 配置错误导致精度回退
