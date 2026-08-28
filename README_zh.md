@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.0.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.1.0-blue" alt="version">
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@
 
 | | 模块 | 能力 | 触发场景 |
 |---|------|------|----------|
-| 📚 | `skill-knowledge/` | 按训练阶段路由的知识问答 | "是什么" / "怎么工作" |
+| 📚 | `skill-knowledge/` | 按训练阶段路由的知识问答 (5 文件) | "是什么" / "怎么工作" |
 | 🔬 | `skill-precision/` | 5 步诊断工作流 | loss NaN / 梯度爆炸 / 精度回退 |
 | ⚡ | `skill-performance/` | 5 步优化工作流 | 吞吐低 / OOM / 扩展效率差 |
 | 📋 | `skill-tickets/` | 结构化案例库检索 | "遇到过吗" / "历史案例" |
@@ -61,7 +61,8 @@ training-crucible/
 │   ├── pretraining.md              #   并行策略、内存优化
 │   ├── post-training.md             #   SFT · DPO · RLHF
 │   ├── rl.md                       #   GRPO · PPO · rollout
-│   └── inference.md                #   KV Cache · 量化 · 投机解码
+│   ├── inference.md                #   KV Cache · 量化 · 投机解码
+│   └── hardware-adapter.md         #   硬件适配层 (torchada + torch_musa)
 ├── skill-precision/                      # 精度专家
 │   ├── SKILL.md                    #   捕获→分类→定位→假设→解决
 │   └── references/                 #   故障分类 · 已知模式
@@ -113,11 +114,11 @@ training-crucible/
 
 | 模块 | 文件数 | 行数 | 核心能力 |
 |------|--------|------|----------|
-| 知识专家 | 4 | 853 | 4 阶段知识问答 |
-| 精度专家 | 3 | 567 | 5 步诊断 + 故障分类 + 已知模式 |
-| 性能专家 | 3 | 822 | 5 步优化 + 瓶颈分类 + SOTA 技术 |
+| 知识专家 | 5 | ~3821 | 5 阶段知识问答 (预训练 + RL + 后训练 + 推理 + 硬件适配) |
+| 精度专家 | 3 | ~1500 | 5 步诊断 + 故障分类 + 已知模式 |
+| 性能专家 | 3 | ~1800 | 5 步优化 + 瓶颈分类 + SOTA 技术 |
 | 问题归档 | 7 | ~490 | 模板 + SKILL.md + 5 个种子 ticket |
-| 共享参考 | 3 | ~391 | 源码映射 + 术语表 + 回答规范 |
+| 共享参考 | 3 | ~800 | 源码映射 + 术语表 + 回答规范 |
 
 ---
 

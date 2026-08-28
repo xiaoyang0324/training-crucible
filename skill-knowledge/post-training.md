@@ -1,175 +1,520 @@
-# 后训练 (Post-training) 知识专家
+# 后训练 (Post-training) — 代码级深度分析
 
-## 1. 概述
+## 0. 后训练总览与仓库定位
 
-后训练在预训练模型基础上，使用高质量标注数据进一步对齐模型行为，使其满足人类偏好和任务需求。
+后训练在预训练模型基础上，使用高质量标注数据对齐模型行为。四个仓库的定位差异显著，面试时必须能清晰区分：
 
-- **预训练 vs 后训练对比**：
+```
+                     SFT        DPO        RLHF/GRPO/PPO
+Megatron-LM       ✓ 完整      ✗ 无        ✓ 原生 GRPO (megatron/rl/)
+torchtitan        ✓ 完整      ✗ 无        △ experiments only (experiments/rl/)
+slime             ✗ 无        ✗ 无        ✓ 完整 PPO/GRPO/CISPO/GSPO
+miles             ✗ 无        ✗ 无        ✓ 完整 PPO/GRPO/GSPO + Reward Hub
+```
+
+> **关键结论**：Megatron-LM 与 torchtitan 均 **无 DPO 实现**。DPO 目前主流实现集中在 HuggingFace TRL / OpenRLHF，不在本研究栈中。GRPO 已取代 PPO 成为主流 RLHF 算法（DeepSeek-V3、Qwen3 路线）。
 
 | 维度 | 预训练 | 后训练 |
 |------|--------|--------|
-| 数据 | 海量无标注语料 | 高质量标注数据 |
-| 数据量 | 万亿级 token | 万~百万级样本 |
-| 目标 | 语言建模能力 | 对齐人类偏好 |
-| 学习率 | 1e-4 ~ 3e-4 | 1e-6 ~ 1e-5 |
-| 训练成本 | 占 90%+ | 相对较小 |
+| 数据 | 万亿级 token 无标注语料 | 万~百万级高质量标注样本 |
+| 学习率 | 1e-4 ~ 3e-4 | 1e-6 ~ 1e-5（小 1-2 数量级） |
+| 目标 | 语言建模能力 | 对齐人类偏好 / 指令跟随 |
+| 损失掩码 | 全 token 计算 | 仅 response 部分（loss masking） |
 
-- **后训练三阶段**：SFT → RM 训练 → RLHF/DPO
+---
 
-## 2. SFT (Supervised Fine-Tuning)
+## 1. SFT（监督微调）
 
-### 2.1 数据格式
+### 1.1 概念原理
 
-SFT 数据为 (instruction, response) 对，常见格式：
+SFT 是最基础的后训练形式：在 (prompt, response) 对上以交叉熵损失微调预训练模型。**核心技巧是 loss masking**——仅在 assistant response  token 上计算损失，prompt/system 部分通过 `IGNORE_INDEX = -100` 掩码掉，避免模型学习"预测用户问题"。
+
+### 1.2 各仓库 SFT 实现代码位置
+
+#### Megatron-LM（生产级，两套 SFT 数据集）
+
+| 文件 | 功能 |
+|------|------|
+| `megatron/training/datasets/sft_dataset.py:51` | `SFTDataset` — 基于 jsonl messages 格式的核心数据集 |
+| `megatron/training/datasets/sft_dataset.py:17` | `SFTLowLevelDataset` — HuggingFace `datasets` 加载 jsonl |
+| `megatron/training/datasets/varlen_dataset.py:3` | `VarlenDataset` — 变长多源 SFT 数据集（HF Hub/parquet/jsonl） |
+| `megatron/core/tokenizers/text/libraries/sft_tokenizer.py:46` | `SFTTokenizer` — 对话分词 + 自动 loss masking |
+| `examples/post_training/modelopt/finetune.py:64` | `SFTDataset`（ModelOpt 版）— 支持 HF 数据集 + sequence packing |
+| `megatron/post_training/loss_func.py:39` | SFT 损失函数（含 KD 蒸馏扩展） |
+
+#### torchtitan（研究级，Grain 数据管道）
+
+| 文件 | 功能 |
+|------|------|
+| `torchtitan/hf_datasets/text_datasets.py:61` | `ChatProcessor` — 对话分词 + prompt 掩码 |
+| `torchtitan/hf_datasets/text_datasets.py:32` | `TextProcessor` — 纯文本预训练式分词 |
+| `torchtitan/components/loss.py:32` | `cross_entropy_loss` + `IGNORE_INDEX = -100` |
+| `torchtitan/components/loss.py:326` | `compute_logprobs` — 对数概率计算（RL 复用） |
+| `torchtitan/components/data/collators.py:41` | `TextCollator` — 变长序列拼接 |
+| `torchtitan/components/data/packing.py:144` | FirstFitPack + IGNORE_INDEX 填充掩码 |
+
+### 1.3 数据格式与 DataLoader
+
+**Megatron-LM SFT 数据格式**（jsonl messages）：
 
 ```json
-{
-  "instruction": "解释量子纠缠",
-  "output": "量子纠缠是...",
-  "input": ""  // 可选上下文
-}
+{"messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "解释量子纠缠"},
+  {"role": "assistant", "content": "量子纠缠是..."}
+]}
 ```
 
-### 2.2 Loss Masking
+`SFTLowLevelDataset.__getitem__` 返回 `messages` 列表（`sft_dataset.py:47`），由 `SFTTokenizer.tokenize_conversation`（`sft_tokenizer.py:130`）分词并生成 target：system/user token 设为 `IGNORE_INDEX = -100`，仅 assistant token 保留真实标签。
 
-SFT 核心技巧：只在 response 部分计算 loss，不惩罚 instruction/prompt 部分。
+**loss masking 核心逻辑**（`sft_tokenizer.py:164-205`）：
 
-```
-Tokens:  [SYS][USER][PROMPT][RESPONSE][EOS]
-Mask:    [0 ][0  ][0    ][1      ][1 ]
-Loss:    ────────────────────────────────
-                Only compute on response
-```
-
-> 源码参考：Megatron-LM `megatron/core/post_training/` — 后训练数据管道与 loss 计算
-
-### 2.3 训练要点
-
-- **Epoch 控制**：通常 1-3 epoch，过多导致过拟合和灾难性遗忘。
-- **数据质量 > 数量**：1000 条高质量数据 > 10000 条噪声数据。
-- **学习率**：比预训练小 1-2 数量级，避免破坏预训练知识。
-
-## 3. DPO (Direct Preference Optimization)
-
-### 3.1 原理
-
-DPO 绕过显式 reward model，直接从偏好数据优化策略。
-
-```
-Loss = -E[ log σ( β × ( log π_θ(y_w|x)/π_ref(y_w|x)
-                        - log π_θ(y_l|x)/π_ref(y_l|x) ) ) ]
-
-其中：
-  y_w = preferred response (chosen)
-  y_l = rejected response
-  π_ref = reference model (冻结的 SFT 模型)
-  β = KL 约束系数
+```python
+target = tokens.copy()
+for turn_idx, turn in enumerate(conversation):
+    role = turn["role"].lower()
+    if role in ("system", "user", "tool"):
+        target[idx : idx + turn_len] = IGNORE_INDEX      # 掩码 prompt
+    elif role == "assistant":
+        target[idx : idx + assistant_prefix_len] = IGNORE_INDEX  # 掩码前缀
 ```
 
-### 3.2 关键要素
+**torchtitan ChatProcessor**（`text_datasets.py:100-150`）采用**前缀重分词**策略精确定位 prompt/response 边界：先 tokenize 完整对话，再单独 tokenize user 消息（`add_generation_prompt=True`），用长度差确定掩码位置，避免 BPE 合并导致的边界错位。
 
-- **Reference Model**：冻结的 SFT 模型，提供 KL 锚点防止策略偏离。
-- **偏好对 (chosen, rejected)**：需要成对的偏好标注。
-- **β 系数**：控制偏离 SFT 模型的程度，β 越大越保守。
+**sequence packing**：两者均支持将多条样本拼接到固定长度（`cu_seqlens` 记录边界）。Megatron-LM 在 `sft_dataset.py:107-150` 实现；torchtitan 在 `packing.py:80-110` 使用 `FirstFitPackIterDataset`。
 
-### 3.3 DPO vs RLHF
+### 1.4 损失函数与训练循环
 
-| 维度 | DPO | RLHF |
+**Megatron-LM SFT 损失**（`post_training/loss_func.py:39-72`）：
+
+```python
+def loss_func(loss_mask, output_tensor, model):
+    loss_lm = _mask_loss(output_tensor, loss_mask)  # sum(losses * loss_mask)
+    loss = loss_lm
+    if args.export_kd_teacher_load:
+        losses = model.compute_kd_loss(student_loss=loss_lm, ...)  # KD 蒸馏扩展
+```
+
+**torchtitan 损失**（`components/loss.py:32-62`）：vocab-parallel cross-entropy，通过 `_LossParallelCrossEntropy`（`loss.py:66-224`）在 TP 维度分布式计算 softmax，仅需 3 次 all-reduce（max / sumexp / gather）。`ChunkedLossWrapper`（`loss.py:509-729`）支持分 chunk 计算 lm_head 降低峰值显存。
+
+### 1.5 SFT 完整调用链（Megatron-LM）
+
+```
+finetune.py::__main__
+  └─ parse_and_validate_args → add_finetune_args (L35)
+  └─ pretrain(cfg, train_valid_test_sft_datasets_provider, forward_step, ...)
+       ├─ train_valid_test_sft_datasets_provider (L438)
+       │    └─ SFTDataset(num_packed_samples, hf_dataset, tokenizer, seq_length)
+       │         ├─ _load_dataset_synchronized → datasets.load_dataset (L159)
+       │         └─ __getitem__ → _process_and_pack_example (L332)
+       │              └─ tokenizer.apply_chat_template + loss_mask
+       └─ forward_step (L544)
+            ├─ get_batch → build_lm_batch (L481)
+            ├─ model(tokens, position_ids, attention_mask, labels)
+            └─ loss_func(loss_mask, output_tensor, model) → _mask_loss
+```
+
+---
+
+## 2. DPO（直接偏好优化）
+
+### 2.1 概念原理
+
+DPO 绕过显式 reward model，直接从偏好对 (chosen, rejected) 优化策略。损失函数：
+
+```
+L_DPO = -E[ log σ( β × ( log π_θ(y_w|x)/π_ref(y_w|x) - log π_θ(y_l|x)/π_ref(y_l|x) ) ) ]
+```
+
+- `y_w` = chosen（偏好响应），`y_l` = rejected（拒绝响应）
+- `π_ref` = 冻结的 reference model（通常是 SFT 模型），提供 KL 锚点
+- `β` = KL 约束系数，控制偏离 SFT 模型的保守程度
+
+### 2.2 DPO 在本研究栈中的现状
+
+**四个仓库均无 DPO 训练损失实现。** 面试时应明确指出：
+
+- **Megatron-LM**：`megatron/rl/agent/api.py:54-55` 定义了 `ContrastiveRollout`（含 `chosen_trajectory` / `rejected_trajectory`），但仅是 RL rollout 数据结构，**无 DPO 损失函数**。`megatron/training/datasets/varlen_dataset.py:45` 明确声明 "preference (chosen/rejected) datasets are out of scope"。
+- **torchtitan / slime / miles**：均无 DPO 实现，聚焦 GRPO/PPO。
+
+DPO 主流实现位于 HuggingFace `TRL`（`DPOTrainer`）/ `OpenRLHF`。若面试被问到，应坦诚本研究栈未覆盖，并描述 DPO 与 GRPO 的取舍：
+
+| 维度 | DPO | GRPO |
 |------|-----|------|
-| Reward Model | 不需要 | 需要单独训练 |
-| 训练稳定性 | 较稳定 | 需调 KL 系数 |
-| 计算成本 | 较低 | 较高（需采样） |
-| 理论等价性 | 特定条件下等价 | 更通用 |
+| Reward Model | 不需要 | 不需要（verifiable reward） |
+| 数据形式 | 离线偏好对 (chosen, rejected) | 在线采样 + 规则奖励 |
+| 训练稳定性 | 较稳定（静态数据） | 需调 KL / clip |
+| 探索能力 | 无（离线） | 有（在线采样） |
+| 工业界趋势 | 用于冷启动 | 主流（DeepSeek/Qwen 路线） |
 
-## 4. RLHF (Reinforcement Learning from Human Feedback)
+### 2.3 Reference Model 管理
 
-### 4.1 流程
+虽然无 DPO，但 GRPO/PPO 中的 reference model 逻辑类似：
+- **slime**：`args.kl_coef` 控制 KL 惩罚强度，`compute_approx_kl(log_probs, ref_log_probs, kl_loss_type)`（`ppo_utils.py:12-51`）支持 k1/k2/k3/low_var_kl 四种 KL 估计器
+- **Megatron-LM GRPO**：`calculate_grpo_loss` 接收 `ref_logprobs` 参数（`rl_utils.py:2774`），KL 项为 `kl_beta * (ref_diff.exp() - ref_diff - 1)`（`rl_utils.py:2843-2844`）
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  SFT Model  │────▶│ Reward Model│────▶│  PPO/GRPO   │
-│  (初始策略)  │     │ (偏好学习)   │     │ (策略优化)   │
-└─────────────┘     └─────────────┘     └─────────────┘
-       │                   │                   │
-       │                   ▼                   │
-       │            score(response)            │
-       │                   │                   │
-       └───── KL 约束 ─────┴───────────────────┘
-```
+---
 
-### 4.2 Reward Model
+## 3. RLHF（基于人类反馈的强化学习）
 
-- **训练数据**：偏好对 (chosen, rejected)
-- **Loss**：`L = -log(σ(r(x, y_w) - r(x, y_l)))`
-- **奖励塑形**：`reward = r_model - β × KL(π_θ || π_ref)`
+### 3.1 概念原理
 
-### 4.3 KL 约束
-
-防止策略过度优化 reward hacking：
+本研究栈中 RLHF 以 **GRPO** 为主流实现（取代 PPO），辅以 PPO 在 slime/miles 中的完整支持：
 
 ```
-final_reward = reward_model_score - β × KL_divergence
+传统 RLHF 三阶段（本研究栈未完全采用）：
+  SFT → Reward Model 训练 → PPO 策略优化
+
+现代 GRPO 路线（本研究栈采用）：
+  SFT → 在线采样 + Verifiable Rule Reward → GRPO 策略优化
 ```
 
-- β 越大，策略越接近 SFT 模型
-- β 过小会导致 reward hacking（生成怪异文本获取高奖励）
+GRPO 核心思想：**用同组采样的 reward 均值/方差归一化代替 learned reward model**：
+
+```
+advantage_i = (reward_i - mean(group)) / std(group)
+```
+
+### 3.2 仓库 RL 实现架构对比
+
+| 仓库 | 入口文件 | 算法 | Off-policy 生成 | Reward 来源 |
+|------|----------|------|----------------|-------------|
+| Megatron-LM | `train_rl.py` | GRPO | ✓ `--rl-partial-rollouts` | 自定义 Agent |
+| torchtitan | `experiments/rl/train.py` | GRPO/DAPO | ✗ (vLLM 同步) | 自定义 reward_fns |
+| slime | `train_async.py` | PPO/GRPO/CISPO/GSPO/REINFORCE++ | ✓ async | Rule-based / RM |
+| miles | `train_async.py` | PPO/GRPO/GSPO/REINFORCE++ | ✓ async | Reward Hub (统一接口) |
+
+### 3.3 Reward Model / Reward Function 代码位置
+
+**miles Reward Hub**（统一奖励接口）— `miles/rollout/`:
+
+| 文件 | 功能 |
+|------|------|
+| `rm_hub/__init__.py:43` | `async_rm()` — 奖励类型分发中枢 |
+| `rm_hub/__init__.py:59-86` | 支持类型：`deepscaler` / `dapo` / `math` / `gpqa` / `f1` / `remote_rm` / `ifbench` / `random` |
+| `rm_hub/deepscaler.py:38` | `get_deepscaler_rule_based_reward` — 规则匹配奖励 |
+| `rm_hub/gpqa.py:54` | `compute_gpqa_reward` — GPQA 选择题评分 |
+| `ray/rollout/train_data_conversion.py:207` | `_normalize_rewards_by_rollout` — 组内奖励归一化 |
+| `ray/rollout/train_data_conversion.py:257` | `_post_process_rewards` — GRPO 标准归一化开关 |
+
+**slime Reward** — `slime/ray/rollout.py:279` `_post_process_rewards`：根据 `advantage_estimator` 选择是否进行 `grpo_std_normalization`（`rollout.py:298`）。
+
+**Megatron-LM** — `megatron/rl/agent/reward_only_agent.py:51` `get_reward()` 为抽象方法，由子类实现自定义奖励函数，在 `_rollout_from_episode`（`reward_only_agent.py:180`）中计算 trajectory reward。
+
+### 3.4 GRPO 训练循环与损失函数
+
+#### Megatron-LM（核心实现）
+
+**入口与调用链**：
+
+```
+train_rl.py::__main__
+  └─ parse_and_validate_args(extra_args_provider=add_inference_args)
+  └─ pretrain(cfg, None, ModelType.encoder_or_decoder, forward_step, model_provider)
+       └─ forward_step (train_rl.py:190)
+            ├─ load_packed_data_by_index → (tokens, advantages, old_logprobs, loss_mask, ref_logprobs, ...)
+            ├─ get_logprobs(model, tokens, position_ids) → current_logprobs
+            └─ calculate_grpo_loss(current, old, ref, advantages, ...) (rl_utils.py:2771)
+                 ├─ ratios = (current_logprobs - old_logprobs).exp()
+                 ├─ clamped_ratios = ratios.clamp(1-eps_lower, 1+eps_upper)
+                 ├─ kl_term = (ref - current).exp() - (ref - current) - 1
+                 └─ loss = -min(ratios*adv, clamped*adv) + kl_beta*kl_term - entropy_weight*entropy
+```
+
+**advantage 计算**（`rl_utils.py:1173-1218`）：
+
+```python
+def calculate_grpo_advantages(rewards, num_turns):
+    reward_means = np.where(real_mask, rewards, 0.0).sum(axis=-1) / real_counts
+    reward_stds = np.sqrt(((rewards - reward_means)**2).sum(axis=-1) / real_counts)
+    advantages = (rewards - reward_means) / (1e-4 + reward_stds)  # 组内归一化
+```
+
+**Off-policy 生成**：`RolloutBank`（`rollout_bank.py:206`）实现单写入持久化存储，`--rl-generation-lag` 控制生成超前步数，`--rl-partial-rollouts` 启用部分 rollout 重叠。
+
+#### torchtitan GRPO/DAPO
+
+**DAPOLoss**（`experiments/rl/losses/dapo.py:23-136`）：
+
+```python
+# 核心计算（L88-105）
+trainer_logprobs, token_entropy = compute_logprobs(logits, labels, return_entropy=True)
+effective_loss_mask = loss_mask & torch.isfinite(generator_logprobs)
+ratio = torch.exp(clamp(trainer_logprobs - generator_logprobs, -10, 10))
+clipped_ratio = clamp(ratio, 1 - ratio_clip_low, 1 + ratio_clip_high)  # 非对称 clip
+token_loss = -min(ratio * advantages, clipped_ratio * advantages)
+loss = (token_loss * effective_loss_mask).sum() / global_valid_tokens
+```
+
+`GRPOLoss`（`losses/grpo.py:17-36`）继承 `DAPOLoss`，将 `ratio_clip_low == ratio_clip_high`（对称 clip）。DAPO 的 "clip-higher" 通过增大上界保留更多 up-weighted token 的概率质量，对抗 entropy collapse。
+
+#### slime（最完整的算法集）
+
+| 文件 | 算法 | 核心函数 |
+|------|------|----------|
+| `utils/ppo_utils.py:12` | KL 估计 | `compute_approx_kl` — k1/k2/k3/low_var_kl |
+| `utils/ppo_utils.py:125` | PPO | `compute_policy_loss` — 标准 PPO clip + dual-clip |
+| `utils/ppo_utils.py:152` | CISPO | `compute_cispo_loss` — 裁剪比 stop-grad，梯度流过 log_probs |
+| `utils/ppo_utils.py:95` | GSPO | `compute_gspo_kl` — 序列级 KL 展开为 per-token |
+| `utils/ppo_utils.py:361` | GRPO | `get_grpo_returns` — 常数 reward 广播 |
+| `utils/ppo_utils.py:371` | REINFORCE++ | `get_reinforce_plus_plus_returns` — chunked discounted returns |
+| `utils/ppo_utils.py:584` | GAE | `vanilla_gae` / `chunked_gae` — 用于 PPO 的 advantage 估计 |
+| `utils/ppo_utils.py:716` | LogProbs | `calculate_log_probs_and_entropy` — vocab-parallel softmax |
+
+#### miles（与 slime 共享架构）
+
+| 文件 | 功能 |
+|------|------|
+| `backends/training_utils/loss.py:28` | `compute_advantages_and_returns` — 统一 advantage 计算调度 |
+| `backends/training_utils/loss_hub/advantages.py:53` | `compute_advantages` — grpo/gspo/ppo/reinforce++ 分支 |
+| `backends/training_utils/loss_hub/math_utils.py:453` | `get_grpo_returns` — GRPO return 计算 |
+| `ray/rollout/train_data_conversion.py:243` | GRPO `grpo_std_normalization` 开关 |
+
+### 3.5 KL 约束实现
+
+KL 散度防止策略偏离参考模型过远（reward hacking）。三种形式：
+
+**作为 reward penalty**（slime PPO）：
+```
+final_reward = reward - kl_coef * KL(pi_theta || pi_ref)
+```
+代码：`slime/utils/ppo_utils.py:30-41` — `compute_approx_kl` k3/low_var_kl: `kl = exp(-log_ratio) - 1 - (-log_ratio)`（非负无偏估计，Schulman blog）
+
+**作为 loss 正则项**（Megatron-LM GRPO）：
+```
+loss = -surrogate + kl_beta * kl_term
+```
+代码：`megatron/rl/rl_utils.py:2843-2858` — `kl_term = ref_diff.exp() - ref_diff - 1`，其中 `ref_diff = ref_logprobs - current_logprobs`
+
+**IS 修正的 KL**（DeepSeek-V3.2 风格，slime）：
+```python
+# ppo_utils.py:44-45
+if importance_ratio is not None:
+    kl = importance_ratio * kl  # 无偏 KL 估计
+```
+
+---
+
+## 4. 后训练数据工程
+
+### 4.1 Chat Template 与 Tokenization
+
+**SFTTokenizer**（`sft_tokenizer.py:46-232`）支持多种 prompt 格式：
+
+| 格式 | assistant_prefix_len | 说明 |
+|------|---------------------|------|
+| `nemotron-nano-v2` | 3 | `<SPECIAL_11>Assistant\n` 前缀掩码 |
+| `nemotron-h-aligned` | 0 | 无前缀掩码 |
+| `default` | 0 | 使用 tokenizer 自带 chat_template，不掩码 |
+
+**对话分词流程**（`sft_tokenizer.py:130-209`）：
+1. `apply_chat_template(conversation, tokenize=True)` → 完整 token 序列
+2. 逐 turn 重新 tokenize 确定边界 → `turn_tokens`
+3. 按 role 对 target 设 `IGNORE_INDEX`
+
+### 4.2 数据加载与批处理
+
+**Megatron-LM VarlenDataset 多源加载**（`varlen_dataset.py:1-48`）：
+- 自动检测 4 种 schema：`openai-messages` / `sharegpt` / `alpaca-dolly` / `pretrain-text`
+- 字段同义词映射：`instruction|prompt|query|question` + `output|response|completion|answer`
+- 多源：HuggingFace Hub / 本地 parquet / 本地 jsonl（pandas 读避免 pyarrow schema 推断失败）
+
+**torchtitan Grain 数据管道**（`hf_datasets/text_datasets.py`）：
+- `HuggingFaceStreamingSource` / `HuggingFaceRandomAccessSource` — 数据源抽象
+- `SampleProcessor` → `TextProcessor` / `ChatProcessor` — 样本级 tokenization
+- `FirstFitPackIterDataset` — 序列打包（`packing.py`）
+- `TextCollator` — 批次级拼接 + padding（`collators.py:41`）
+
+**Megatron-LM SFT packing**（`sft_dataset.py:104-150`）：
+- 多条样本拼接到 `sequence_length + 1`（+1 用于 input/label 错位）
+- `cu_seqlens` 记录每条子序列边界
+- CP（Context Parallel）场景下 padding 到 `cp_size * 2` 的倍数（`sft_dataset.py:127-132`）
+
+### 4.3 后训练流水线 ASCII 图
+
+```
+            ┌─────────────────────────────────────────────────────────────┐
+            │                   后训练数据流水线                           │
+            └─────────────────────────────────────────────────────────────┘
+
+  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+  │  Raw Data    │    │  Tokenize +  │    │   Packing /  │    │   Forward    │
+  │  jsonl/HF    │───▶│  Loss Mask   │───▶│  Batching    │───▶│   + Loss     │
+  │  parquet     │    │  IGNORE_INDEX│    │  cu_seqlens  │    │              │
+  └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+        │                    │                   │                    │
+   SFTLowLevelDataset   SFTTokenizer      SFTDataset           loss_func
+   VarlenDataset        ChatProcessor     FirstFitPack       calculate_grpo_loss
+   (sft_dataset.py:17)  (sft_tokenizer    (sft_dataset.py:    (rl_utils.py:2771)
+   (varlen_dataset.py)   .py:130)          104)
+
+
+            ┌─────────────────────────────────────────────────────────────┐
+            │                GRPO/PPO 训练循环                             │
+            └─────────────────────────────────────────────────────────────┘
+
+   ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+   │ Generate │────▶│  Reward  │────▶│ Advantage│──┬─▶│  Policy  │
+   │ Rollouts │     │ Function │     │ Compute  │  │  │  Update  │
+   └──────────┘     └──────────┘     └──────────┘  │  └──────────┘
+        │                                            │       │
+   InferenceEngine              calculate_grpo_       │  calculate_grpo_loss
+   (megatron/rl/                advantages            │  compute_policy_loss
+    inference/)                 (rl_utils.py:1173)    │  (ppo_utils.py:125)
+                                                    │
+                                              ┌──────────┐
+                                              │ KL Constraint│
+                                              │ kl_beta *   │
+                                              │ kl_term     │
+                                              └──────────┘
+
+   Off-policy 重叠 (Megatron-LM --rl-partial-rollouts):
+   ┌──────────────────────────────────────────────────────────────┐
+   │ Step N:   [Train N] ──────────────────────────────▶          │
+   │ Step N+1:          [Train N+1] ──────────────────▶           │
+   │ Gen:       [Gen N+1] [Gen N+2] [Gen N+3]                     │
+   │            ──── lag=2 ────▶                                  │
+   │ RolloutBank (rollout_bank.py:206) 持久化已完成 rollout       │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## 5. 关键配置参数表
 
-| 参数 | 含义 | 典型值 | 影响 |
-|------|------|--------|------|
-| `learning_rate` | 学习率 | 1e-6 ~ 1e-5 | 过大破坏预训练知识 |
-| `epoch` | 训练轮数 | 1-3 (SFT) | 过多过拟合 |
-| `max_length` | 最大序列长度 | 2049-8192 | 显存与效果权衡 |
-| `warmup_ratio` | 预热比例 | 0.03-0.1 | 训练稳定性 |
-| `dpo_beta` | DPO KL 系数 | 0.1-0.5 | 偏离 SFT 程度 |
-| `kl_coeff` | RLHF KL 系数 | 0.01-0.2 | 策略保守性 |
-| `reward_baseline` | 奖励基线 | running mean | 减少方差 |
-| `data_mixing_ratio` | 数据混合比例 | 视任务 | 多任务平衡 |
+### 5.1 SFT 配置参数
 
-## 6. 常见误区
+| 参数 | 仓库 | 含义 | 典型值 |
+|------|------|------|--------|
+| `--seq-length` | Megatron-LM | 最大序列长度 | 2048-8192 |
+| `--finetune-hf-dataset` | Megatron-LM | HuggingFace 数据集名称 | `HuggingFaceH4/ultrachat_200k` |
+| `--finetune-data-split` | Megatron-LM | 数据集 split | `train` |
+| `--micro-batch-size` | Megatron-LM | SFT 强制为 1 | 1 |
+| `--num-tokens-per-batch` | torchtitan | packing 批次 token 数 | 视配置 |
+| `--messages-fn` | torchtitan | 消息字段提取函数 | 自定义 |
+| `--reset-position-ids` | Megatron-LM | 每条样本重置 position_ids | True |
+| `--eod-mask-loss` | Megatron-LM | EOD token 掩码 | True |
 
-### ❌ 误区 1："SFT epoch 越多越好"
-**正解**：SFT 极易过拟合。超过 3 epoch 通常导致：
-- 灾难性遗忘（丢失预训练知识）
-- 模式坍塌（输出单一化）
-- 泛化性下降
-建议：1-2 epoch 为佳，配合 early stopping。
+### 5.2 GRPO 配置参数
 
-### ❌ 误区 2："DPO 完全替代 RLHF"
-**正解**：DPO 在离线偏好数据上表现好，但：
-- 无法利用在线采样探索
-- 对新分布数据适应性差
-- 工业界（如 OpenAI）仍大量使用 RLHF/PPO
+| 参数 | 仓库 | 含义 | 典型值 |
+|------|------|------|--------|
+| `--grpo-prompts-per-step` | Megatron-LM | 每步采样的 prompt 数 | 32 |
+| `--grpo-group-size` | Megatron-LM | 每个 prompt 采样响应数 | 2-8 |
+| `--grpo-clamp-eps-lower` | Megatron-LM | 重要性比下界 clip | 0.01 |
+| `--grpo-clamp-eps-upper` | Megatron-LM | 重要性比上界 clip | 0.01 (DAPO 可非对称) |
+| `--grpo-kl-beta` | Megatron-LM | KL 正则系数 | 0.001 |
+| `--grpo-entropy-term-weight` | Megatron-LM | 熵正则系数 | 0.0 |
+| `--rl-partial-rollouts` | Megatron-LM | 启用 off-policy 生成重叠 | True |
+| `--rl-generation-lag` | Megatron-LM | 生成超前步数 | 0-2 |
+| `--rl-submission-granularity` | Megatron-LM | 生成提交粒度 (R/G/B) | B |
+| `--ratio-clip-low` | torchtitan | DAPO 下界 clip | 0.2 |
+| `--ratio-clip-high` | torchtitan | DAPO 上界 clip (可 > low) | 0.28 |
 
-### ❌ 误区 3："Reward Model 精度越高越好"
-**正解**：Reward model 过度拟合会导致：
-- 策略学会 reward hacking
-- 生成高奖励但低质量文本
-需要定期用人工评估校准。
+### 5.3 PPO/通用 RL 配置参数
 
-### ❌ 误区 4："Loss Masking 可以忽略"
-**正解**：不做 loss masking 会导致：
-- 模型学习预测 prompt 内容
-- 指令跟随能力下降
-- 训练信号噪声增大
+| 参数 | 仓库 | 含义 | 典型值 |
+|------|------|------|--------|
+| `--advantage-estimator` | slime/miles | 算法选择 | grpo/ppo/reinforce++/cispo/gspo |
+| `--kl-coef` | slime/miles | KL reward 惩罚系数 | 0.01-0.2 |
+| `--kl-loss-coef` | slime/miles | KL loss 正则系数 | 0.01-0.05 |
+| `--eps-clip` | slime/miles | PPO clip 范围 | 0.2 |
+| `--eps-clip-high` | slime/miles | PPO 上界 clip（非对称） | 0.2-0.28 |
+| `--gamma` | slime/miles | GAE 折扣因子 | 1.0 |
+| `--lambd` | slime/miles | GAE lambda | 1.0 |
+| `--entropy-coef` | slime/miles | 熵正则系数 | 0.0 |
+| `--n-samples-per-prompt` | slime/miles | 每 prompt 采样响应数 | 4-16 |
+| `--rollout-batch-size` | slime/miles | 每轮 rollout 的 prompt 数 | 视配置 |
+| `--num-steps-per-rollout` | slime/miles | rollout 划分的训练步数 | 4-8 |
+| `--normalize-advantages` | slime/mines | 跨 DP 组归一化 advantage | True |
+| `--grpo-std-normalization` | slime/miles | GRPO 组内标准差归一化 | True |
+| `--kl-loss-type` | slime/miles | KL 估计器类型 | k1/k2/k3/low_var_kl |
 
-### ❌ 误区 5："后训练可以修复预训练的所有缺陷"
-**正解**：后训练能力上限由预训练决定。预训练缺乏的知识/能力，后训练难以弥补。数据质量是根本。
+### 5.4 Reward Model 配置参数
 
-## 7. 源码文件索引表
+| 参数 | 仓库 | 含义 | 典型值 |
+|------|------|------|--------|
+| `--rm-type` | miles | 奖励函数类型 | deepscaler/dapo/math/gpqa/f1/remote_rm |
+| `--rm-url` | miles | 远程 RM 服务地址 | URL |
+| `--custom-rm-path` | miles | 自定义奖励函数路径 | 文件路径 |
+| `--opd-kl-coef` | slime/miles | On-Policy Distillation KL 系数 | 0.0 |
+| `--custom-advantage-function-path` | slime | 自定义 advantage 函数路径 | 文件路径 |
 
-| 文件路径 | 功能描述 |
-|----------|----------|
-| `Megatron-LM/megatron/core/post_training/` | 后训练数据管道与训练逻辑 |
-| `Megatron-LM/megatron/core/post_training/modelopt/` | 模型优化后训练（量化感知） |
-| `Megatron-LM/megatron/core/config.py` | 训练配置定义 |
-| `miles/miles/rollout/sft_rollout.py` | SFT 数据 rollout 生成 |
-| `slime/slime/rollout/sft_rollout.py` | SFT rollout 实现 |
-| `miles/miles/true_on_policy/` | 在线策略训练框架 |
-| `torchtitan/torchtitan/experiments/rl/losses/` | RL 损失函数实现 |
+---
 
-## 相关案例
+## 6. 源码文件索引
 
-- TICKET-20260827-001 — FP8 模型入图后 loss 发散——scaling factor 被冻住
-- TICKET-20260827-003 — MindSpore RMSNorm epsilon 配置错误导致精度回退
+### 6.1 Megatron-LM
+
+| 文件路径 | 功能描述 | 关键行号 |
+|----------|----------|----------|
+| `megatron/training/datasets/sft_dataset.py` | SFT 数据集（jsonl messages + packing） | L17 `SFTLowLevelDataset`, L51 `SFTDataset`, L169 `loss_mask` |
+| `megatron/training/datasets/varlen_dataset.py` | 变长多源 SFT 数据集 | L3 说明, L54 字段同义词 |
+| `megatron/core/tokenizers/text/libraries/sft_tokenizer.py` | SFT 分词器 + chat template masking | L46 `SFTTokenizer`, L130 `tokenize_conversation` |
+| `megatron/post_training/loss_func.py` | SFT 损失函数（+ KD 蒸馏） | L39 `loss_func`, L13 `_mask_loss` |
+| `examples/post_training/modelopt/finetune.py` | SFT 入口脚本（HF datasets + packing） | L64 `SFTDataset`, L438 `train_valid_test_sft_datasets_provider` |
+| `train_rl.py` | GRPO RL 训练入口 | L190 `forward_step`, L337 `train_valid_test_datasets_provider` |
+| `megatron/rl/rl_utils.py` | GRPO 核心工具函数 | L1067 `get_logprobs`, L1173 `calculate_grpo_advantages`, L2771 `calculate_grpo_loss` |
+| `megatron/rl/rollout_bank.py` | Rollout 持久化存储 | L206 `RolloutBank` |
+| `megatron/rl/agent/reward_only_agent.py` | Reward-only Agent 基类 | L51 `get_reward`, L180 `_rollout_from_episode` |
+| `megatron/rl/agent/api.py` | Agent/Rollout 类型定义 | L54 `ContrastiveRollout` |
+| `megatron/rl/README.md` | Megatron-RL 设计文档 | 全文（off-policy lag 说明） |
+
+### 6.2 torchtitan
+
+| 文件路径 | 功能描述 | 关键行号 |
+|----------|----------|----------|
+| `torchtitan/hf_datasets/text_datasets.py` | SFT 数据处理（ChatProcessor） | L32 `TextProcessor`, L61 `ChatProcessor`, L100 `_tokenize_sample` |
+| `torchtitan/components/loss.py` | 损失函数（CE / chunked / vocab-parallel） | L27 `IGNORE_INDEX`, L32 `cross_entropy_loss`, L326 `compute_logprobs`, L509 `ChunkedLossWrapper` |
+| `torchtitan/components/data/collators.py` | 批次 collator | L41 `TextCollator`, L71 IGNORE_INDEX padding |
+| `torchtitan/components/data/packing.py` | 序列打包 | L102 `IGNORE_INDEX`, L144 填充掩码 |
+| `torchtitan/experiments/rl/train.py` | RL 训练入口（Monarch Actors） | L20 命令, L41 `breakable_cudagraph_env` |
+| `torchtitan/experiments/rl/losses/dapo.py` | DAPO 损失（per-token clip-higher） | L23 `DAPOLoss`, L57 `__call__`, L99 核心 clip |
+| `torchtitan/experiments/rl/losses/grpo.py` | GRPO 损失（DAPO 对称特例） | L17 `GRPOLoss`, L26 `clip_eps` |
+| `torchtitan/experiments/rl/rollout_recorder.py` | Rollout 记录器（保留极端 reward） | L34 `keep_extreme_rewards` |
+
+### 6.3 slime
+
+| 文件路径 | 功能描述 | 关键行号 |
+|----------|----------|----------|
+| `slime/utils/ppo_utils.py` | PPO/GRPO/CISPO/GSPO 核心算法集 | L12 `compute_approx_kl`, L125 `compute_policy_loss`, L152 `compute_cispo_loss`, L361 `get_grpo_returns`, L584 `vanilla_gae`, L716 `calculate_log_probs_and_entropy` |
+| `slime/ray/rollout.py` | Rollout 执行 + reward 后处理 | L279 `_post_process_rewards`, L298 GRPO normalization |
+| `slime/utils/arguments.py` | RL 训练配置 | L1382 `--eps-clip`, L1470 `--entropy-coef`, L1839 kl_coef 校验 |
+
+### 6.4 miles
+
+| 文件路径 | 功能描述 | 关键行号 |
+|----------|----------|----------|
+| `miles/backends/training_utils/loss.py` | 统一 advantage + loss 调度 | L28 `compute_advantages_and_returns`, L36 算法列表 |
+| `miles/backends/training_utils/loss_hub/advantages.py` | Advantage 计算分支 | L53 `compute_advantages` (grpo/gspo/ppo/reinforce++) |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | GRPO return + KL 工具 | L453 `get_grpo_returns` |
+| `miles/rollout/rm_hub/__init__.py` | Reward Hub 统一接口 | L43 `async_rm`, L59-86 奖励类型分发 |
+| `miles/rollout/rm_hub/deepscaler.py` | DeepScaler 规则奖励 | L38 `get_deepscaler_rule_based_reward` |
+| `miles/ray/rollout/train_data_conversion.py` | 奖励归一化处理 | L207 `_normalize_rewards_by_rollout`, L257 `_post_process_rewards` |
+| `miles/rollout/on_policy_distillation.py` | On-Policy Distillation | L88 `_get_reward_weight_mode`, L352 `reward_func` |
+
+---
+
+## 7. 面试高频要点
+
+### 7.1 Loss Masking 为何必须？
+
+不做 loss masking 会导致模型学习预测 prompt 内容（而非学习生成 response），指令跟随能力下降。`IGNORE_INDEX = -100` 是 PyTorch `cross_entropy` 的默认忽略索引。torchtitan 在 `components/loss.py:27`、Megatron-LM 在 `sft_dataset.py:14` 均定义为该值。
+
+### 7.2 GRPO 取代 PPO 的原因
+
+PPO 需要 learned reward model + value network（critic），训练成本高且不稳定。GRPO 用同组采样的 reward 均值/方差归一化代替，无需额外网络。代码体现：Megatron-LM `calculate_grpo_advantages`（`rl_utils.py:1173`）仅做组内 z-score，而 PPO 路径需要 `vanilla_gae`（`ppo_utils.py:584`）+ value head。
+
+### 7.3 各仓库的设计哲学差异
+
+- **Megatron-LM**：生产级，megatron/rl/ 模块与 training loop 深度集成，支持 off-policy 生成重叠（`--rl-partial-rollouts` + `RolloutBank`）
+- **torchtitan**：研究级，PyTorch-native SPMD，RL 放在 experiments/，强调可组合性（DAPOLoss → GRPOLoss 继承）
+- **slime**：算法最全（PPO/GRPO/CISPO/GSPO/REINFORCE++），`@torch.compile(dynamic=True)` 装饰核心损失函数
+- **miles**：Reward Hub 统一抽象（`async_rm` 分发），生产级基础设施（async、LoRA、on-policy distillation）
+
+### 7.4 后训练 vs 预训练的并行策略差异
+
+后训练（尤其 RLHF）中生成阶段（inference）与训练阶段常使用不同并行策略：
+- Megatron-LM off-policy 生成：`max_effective_lag = DP * engine.max_requests / (G * P) - 1`（`rl/README.md:76`）
+- miles/slime async：`rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout` 决定 global batch（`arguments.py:1965`）
+

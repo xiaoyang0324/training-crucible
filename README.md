@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.0.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.1.0-blue" alt="version">
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@ Training large-scale AI models is systems engineering at its hardest — combini
 
 | | Module | What it does | When to use |
 |---|--------|--------------|-------------|
-| 📚 | `skill-knowledge/` | Knowledge Q&A routed by training stage | "What is X" / "How does Y work" |
+| 📚 | `skill-knowledge/` | Knowledge Q&A routed by training stage (5 files) | "What is X" / "How does Y work" |
 | 🔬 | `skill-precision/` | 5-step diagnostic workflow | Loss NaN / Gradient explosion / Accuracy regression |
 | ⚡ | `skill-performance/` | 5-step optimization workflow | Low throughput / OOM / Poor scaling efficiency |
 | 📋 | `skill-tickets/` | Structured case archive retrieval | "Have we seen this before" / "Past cases" |
@@ -60,7 +60,8 @@ training-crucible/
 │   ├── pretraining.md              #   Parallelism strategies, memory optimization
 │   ├── post-training.md             #   SFT · DPO · RLHF
 │   ├── rl.md                       #   GRPO · PPO · rollout generation
-│   └── inference.md                #   KV Cache · Quantization · Speculative decoding
+│   ├── inference.md                #   KV Cache · Quantization · Speculative decoding
+│   └── hardware-adapter.md         #   Hardware adapter layer (torchada + torch_musa)
 ├── skill-precision/                      # Precision expert
 │   ├── SKILL.md                    #   Capture → Classify → Localize → Hypothesize → Resolve
 │   └── references/                 #   Failure taxonomy · Known patterns
@@ -112,11 +113,11 @@ Every technical claim cites a **local source repo** (file path + line number) as
 
 | Module | Files | Lines | Core |
 |--------|-------|-------|------|
-| Knowledge | 4 | 853 | 4-stage knowledge Q&A |
-| Precision | 3 | 567 | 5-step diagnosis + failure taxonomy + known patterns |
-| Performance | 3 | 822 | 5-step optimization + bottleneck taxonomy + SOTA techniques |
+| Knowledge | 5 | ~3821 | 5-stage knowledge Q&A (pretraining + RL + post-training + inference + hardware-adapter) |
+| Precision | 3 | ~1500 | 5-step diagnosis + failure taxonomy + known patterns |
+| Performance | 3 | ~1800 | 5-step optimization + bottleneck taxonomy + SOTA techniques |
 | Tickets | 7 | ~490 | Template + SKILL.md + 5 seed cases |
-| References | 3 | ~391 | Source repo map + glossary + answer conventions |
+| References | 3 | ~800 | Source repo map + glossary + answer conventions |
 
 ---
 
