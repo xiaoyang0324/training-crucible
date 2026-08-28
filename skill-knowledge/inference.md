@@ -299,6 +299,8 @@
 
 ### 5.3 MoE Inference（Fused MoE on MUSA）
 
+> **MoE 训练侧的完整 Router / Load Balancing / Token Dispatch 分析见 `moe.md`**。本节聚焦推理侧的 Fused MoE kernel 实现。
+
 | 文件:行 | 功能 |
 |---------|------|
 | `torchlorada/src/torchada/triton/runtime/fused_moe/fused_moe.py:331` | `fused_experts_impl()` — MoE 推理核心实现入口 |

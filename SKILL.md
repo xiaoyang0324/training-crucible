@@ -40,6 +40,8 @@ description: >
 |------|------|------|
 | **知识问答** | `skill-knowledge/` | 按训练阶段路由，解释概念、架构、配置 |
 | **硬件适配** | `skill-knowledge/` | 按训练阶段 + 硬件适配层路由，覆盖 Megatron/torchtitan/miles/slime/torchada/torch_musa 六仓代码级分析 |
+| **MoE 深度分析** | `skill-knowledge/moe.md` | MoE 跨仓库代码级分析（Router/Load Balancing/Token Dispatch/EP） |
+| **DeepSpeed 深度分析** | `skill-knowledge/deepspeed.md` | ZeRO-1/2/3、MoE、Pipeline、Autotuning 代码级分析 |
 | **精度诊断** | `skill-precision/` | 5 步工作流诊断 loss/梯度/收敛问题 |
 | **性能优化** | `skill-performance/` | 5 步工作流优化吞吐/内存/扩展效率 |
 | **问题归档** | `skill-tickets/` | 结构化案例库，按症状/阶段/框架检索 |
@@ -64,7 +66,9 @@ description: >
     │     ├─ 含 SFT / DPO / RLHF / alignment / 后训练 ──► skill-knowledge/post-training.md
     │     ├─ 含 GRPO / PPO / RL / 强化学习 ──────────────► skill-knowledge/rl.md
     │     ├─ 含 quant / KV cache / speculative / 推理 ───► skill-knowledge/inference.md
-    │     └─ 含 torchada / torch_musa / MUSA / 硬件适配 ──► skill-knowledge/hardware-adapter.md
+    │     ├─ 含 torchada / torch_musa / MUSA / 硬件适配 ──► skill-knowledge/hardware-adapter.md
+    │     ├─ 含 MoE / mixture of expert / router / expert ► skill-knowledge/moe.md
+    │     └─ 含 DeepSpeed / ZeRO / offload / CPU Adam ────► skill-knowledge/deepspeed.md
     │
     ├─ loss NaN / loss spike / 梯度爆炸 / 精度异常 / ──────► 精度诊断
     │     train-infer mismatch / 不收敛 / 发散                    │
@@ -97,6 +101,8 @@ description: >
 | 训练太慢, 速度上不去, GPU闲置 | `skill-performance/` |
 | torchada, torch_musa, MUSA, 摩尔线程, Moore Threads, 硬件适配, 兼容层 | `skill-knowledge/hardware-adapter.md` |
 | graph rotation, patch engine, CUDA Graph 轮换 | `skill-knowledge/hardware-adapter.md` |
+| MoE, mixture of experts, router, TopK, expert parallel, token dispatch, load balancing | `skill-knowledge/moe.md` |
+| DeepSpeed, ZeRO, ZeRO-1/2/3, offload, CPU Adam, DeepSpeedEngine, autotuning | `skill-knowledge/deepspeed.md` |
 
 > **注：** 框架关键词（Megatron/torchtitan/miles/slime/torchada/torch_musa）不单独路由。
 > 先按意图确定模块，再在模块内用框架关键词定位具体代码。详见 `skill-references/source-repo-map.md`。
@@ -120,6 +126,8 @@ description: >
 |------|------|------|
 | 知识专家 | `skill-knowledge/` | 按训练阶段分 5 个文件 |
 | 硬件适配 | `skill-knowledge/hardware-adapter.md` | torchada CUDA→MUSA 兼容层 + torch_musa MUSA 后端，含 patch 引擎、graph rotation、算子调度 |
+| MoE 深度分析 | `skill-knowledge/moe.md` | MoE 跨仓库代码级分析：Router/Load Balancing/Token Dispatch/EP，覆盖 Megatron/DeepSpeed/torchtitan/torchada |
+| DeepSpeed 深度分析 | `skill-knowledge/deepspeed.md` | ZeRO-1/2/3、MoE、Pipeline、Autotuning、Inference 代码级分析 |
 | 精度专家 | `skill-precision/` | 5 步诊断工作流 + 精度故障分类 |
 | 性能专家 | `skill-performance/` | 5 步优化工作流 + SOTA 技术目录 |
 | 问题归档 | `skill-tickets/` | 检索 & 归档工作流 |

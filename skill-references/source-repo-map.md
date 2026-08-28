@@ -713,36 +713,143 @@ torch.compile()
 
 ---
 
-## 7. 跨仓库技术对比表
+## 7. DeepSpeed
 
-| 技术点 | Megatron-LM | torchtitan | miles | slime | torchada | torch_musa |
-|--------|------------|-----------|-------|-------|----------|-----------|
-| **并行策略** | TP+PP+DP+EP+CP | TP+PP+DP+CP | 继承后端 | 继承后端 | N/A | N/A |
-| **TP 实现** | ColumnParallelLinear | DTensor-based | 继承 Megatron | 继承 Megatron | N/A | N/A |
-| **PP 调度** | 1F1B / Interleaved | pipeline_llm | 继承 Megatron | 继承 Megatron | N/A | N/A |
-| **DP 实现** | DistributedOptimizer (ZeRO-1) | FSDP2 (DTensor) | FSDP2 / 继承 | 继承 Megatron | N/A | N/A |
-| **EP 实现** | MoE 原生 EP | N/A | 继承 Megatron | 继承 Megatron | N/A | N/A |
-| **CP 实现** | 原生 CP + Hybrid CP | context_parallel | cp_utils.py | cp_utils.py | N/A | N/A |
-| **Recompute** | checkpointed_forward | FullAC / SelectiveAC / MemoryBudgetAC | 继承后端 | 继承后端 | N/A | N/A |
-| **CUDA Graph** | 原生 CUDA Graph | CUDAGraphWrapper | 继承后端 | 继承后端 | _Rotation (LRU) | MUSAGraph |
-| **FP8 支持** | Transformer Engine FP8 | Float8LinearConverter | N/A | N/A | Triton FP8 kernel | N/A |
-| **FP4 支持** | NVFP4 | N/A | N/A | N/A | N/A | N/A |
-| **MoE 实现** | MoELayer + TopKRouter | N/A | 继承 Megatron | 继承 Megatron | Fused MoE Triton | N/A |
-| **RL 支持** | 仅训练后端 | TitanRL 实验 | GRPO/PPO 完整 | GRPO/PPO + Agentic | N/A | N/A |
-| **Weight Sync** | N/A | N/A | UpdateWeight | UpdateWeightFromDistributed | N/A | N/A |
-| **Rollout 引擎** | N/A | N/A | SGLang | SGLang | N/A | N/A |
-| **True On-Policy** | N/A | N/A | true_on_policy/ | N/A | N/A | N/A |
-| **Checkpoint** | Dist checkpointing | DCP (Distributed CP) | 继承后端 | 继承后端 | N/A | N/A |
-| **编译** | N/A | torch.compile | 继承后端 | 继承后端 | N/A | Inductor |
-| **硬件支持** | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | Ada/RTX + MUSA | MUSA GPU |
-| **Ray 编排** | N/A | N/A | 完整支持 | 完整支持 | N/A | N/A |
-| **Fault Tolerance** | 基础容错 | N/A | 完整 FT | 基础容错 | N/A | N/A |
-| **内存优化** | ZeRO-1 + Recompute | FSDP2 + AC | 继承后端 | 继承后端 | Graph Rotation | CachingAllocator |
-| **配置系统** | argparse + ConfigContainer | tyro-based | argparse | argparse | env vars | env vars |
+### 7.1 定位与设计理念
+
+DeepSpeed 是 **Microsoft 开发的分布式训练优化库**，核心价值在于：
+- **ZeRO 系列**：ZeRO-1/2/3 三级优化器分片，显存优化的黄金标准
+- **DeepSpeedEngine**：统一的训练引擎封装，兼容 PyTorch 模型
+- **MoE 支持**：独立的 MoE 实现（TokenChoiceTopKRouter ported from torchtitan）
+- **Pipeline Parallel**：1F1B schedule 的 PipelineEngine
+- **Autotuning**：自动超参调优
+- **Inference Engine**：kernel injection 推理加速
+
+**与 Megatron/torchtitan 的差异**：
+- Megatron 是"框架"（定义训练循环），DeepSpeed 是"库"（封装现有 PyTorch 训练循环）
+- DeepSpeed ZeRO-3 比 Megatron DistributedOptimizer (ZeRO-1) 更激进的显存优化
+- DeepSpeed 不定义模型架构，通过 module_inject 替换现有模块
+
+**工作定位**：当问题涉及"ZeRO 三阶段"、"CPU Offload"、"DeepSpeedEngine 封装"、"ZeRO vs FSDP 对比"时，**首选引用此仓**。
+
+### 7.2 核心架构（ASCII 图）
+
+```
+deepspeed/cli/deepspeed_run.py  (入口)
+  │
+  └─ deepspeed/runtime/engine.py:235  DeepSpeedEngine.__init__()
+       │
+       ├─ DeepSpeedConfig()                    ← 解析 ds_config JSON
+       ├─ _configure_expert_parallel()         ← EP 配置
+       ├─ _configure_tensor_parallel()         ← TP 配置
+       │
+       ├─ ZeRO 优化器
+       │     ├─ stage_1_and_2.py:134  DeepSpeedZeroOptimizer  (ZeRO-1/2)
+       │     └─ stage3.py  DeepSpeedZeroOptimizer_Stage3  (ZeRO-3)
+       │
+       ├─ PipelineEngine (可选)
+       │     └─ pipe/engine.py:60  PipelineEngine
+       │
+       └─ 训练循环
+             ├─ engine.train_batch()           ← 前向+反向+优化器步
+             └─ engine.step()
+```
+
+### 7.3 核心调用链
+
+**初始化链：**
+```
+DeepSpeedEngine.__init__()
+  → DeepSpeedConfig(config)           ← 解析 ds_config
+  → _configure_optimizer()            ← 构建 ZeRO 优化器
+  │    ├─ stage_1_and_2.py  DeepSpeedZeroOptimizer  (ZeRO-1/2)
+  │    └─ stage3.py  DeepSpeedZeRoOffload  (ZeRO-3)
+  → _configure_lr_scheduler()
+  → _configure_model()                ← module_inject 替换
+```
+
+**ZeRO-3 参数分片链：**
+```
+stage3.py  DeepSpeedZeroOptimizer_Stage3
+  → parameter_offload.py  DeepSpeedZeRoOffload
+    → partition_parameters.py  init_partitioned_parameters()
+    → all-gather on demand (前向/反向时动态 gather)
+    → partitioned_param_coordinator.py  PartitionedParameterCoordinator
+```
+
+**MoE 前向链：**
+```
+deepspeed/moe/layer.py:17  MoE
+  → sharded_moe.py:563  MOELayer.forward()
+    → sharded_moe.py:474  TopKGate.forward()      # 路由打分
+    │    ├─ top1gating() / top2gating() / topkgating()
+    │    └─ capacity() 计算
+    → ep_router.py:27  TokenChoiceTopKRouter     # (可选) node-limited routing
+    → experts.py  Experts.forward()              # 本地 expert 计算
+```
+
+### 7.4 关键文件索引（按功能分类）
+
+| 功能 | 文件路径 | 关键类/函数 |
+|------|---------|------------|
+| 引擎 | `deepspeed/runtime/engine.py:235` | `DeepSpeedEngine` |
+| ZeRO-1/2 | `deepspeed/runtime/zero/stage_1_and_2.py:134` | `DeepSpeedZeroOptimizer` |
+| ZeRO-3 | `deepspeed/runtime/zero/stage3.py` | `DeepSpeedZeroOptimizer_Stage3` |
+| 参数 Offload | `deepspeed/runtime/zero/parameter_offload.py` | `DeepSpeedZeRoOffload` |
+| 参数分片 | `deepspeed/runtime/zero/partition_parameters.py` | `init_partitioned_parameters` |
+| MoE 层 | `deepspeed/moe/layer.py:17` | `MoE` |
+| MoE Gate | `deepspeed/moe/sharded_moe.py:474` | `TopKGate` |
+| EP Router | `deepspeed/moe/ep_router.py:27` | `TokenChoiceTopKRouter` |
+| Pipeline | `deepspeed/runtime/pipe/engine.py:60` | `PipelineEngine` |
+| Autotuning | `deepspeed/autotuning/autotuner.py` | `Autotuner` |
+| Inference | `deepspeed/inference/engine.py` | `InferenceEngine` |
+| CPU Adam | `deepspeed/ops/adam/cpu_adam.py` | `DeepSpeedCPUAdam` |
+| Fused Adam | `deepspeed/ops/adam/fused_adam.py` | `FusedAdam` |
+
+### 7.5 配置参数速查
+
+| 参数 | 说明 |
+|------|------|
+| `zero_optimization.stage` | ZeRO 阶段 (1/2/3) |
+| `zero_optimization.offload_optimizer` | CPU/NVMe 优化器 offload |
+| `zero_optimization.offload_param` | CPU/NVMe 参数 offload |
+| `train_micro_batch_size_per_gpu` | 微批大小 |
+| `gradient_accumulation_steps` | 梯度累积步数 |
+| `fp16.enabled` | FP16 混合精度 |
+| `bf16.enabled` | BF16 混合精度 |
 
 ---
 
-## 8. "遇到问题时查哪里" 路由表
+## 8. 跨仓库技术对比表
+
+| 技术点 | Megatron-LM | torchtitan | DeepSpeed | miles | slime | torchada | torch_musa |
+|--------|------------|-----------|-----------|-------|-------|----------|-----------|
+| **并行策略** | TP+PP+DP+EP+CP | TP+PP+DP+CP | TP+PP+DP+EP | 继承后端 | 继承后端 | N/A | N/A |
+| **TP 实现** | ColumnParallelLinear | DTensor-based | module_inject | 继承 Megatron | 继承 Megatron | N/A | N/A |
+| **PP 调度** | 1F1B / Interleaved | pipeline_llm | 1F1B PipelineEngine | 继承 Megatron | 继承 Megatron | N/A | N/A |
+| **DP 实现** | DistributedOptimizer (ZeRO-1) | FSDP2 (DTensor) | ZeRO-1/2/3 | FSDP2 / 继承 | 继承 Megatron | N/A | N/A |
+| **EP 实现** | MoE 原生 EP | N/A | MoE EP (TokenChoice) | 继承 Megatron | 继承 Megatron | N/A | N/A |
+| **CP 实现** | 原生 CP + Hybrid CP | context_parallel | N/A | cp_utils.py | cp_utils.py | N/A | N/A |
+| **Recompute** | checkpointed_forward | FullAC / SelectiveAC / MemoryBudgetAC | activation_checkpointing | 继承后端 | 继承后端 | N/A | N/A |
+| **CUDA Graph** | 原生 CUDA Graph | CUDAGraphWrapper | N/A | 继承后端 | 继承后端 | _Rotation (LRU) | MUSAGraph |
+| **FP8 支持** | Transformer Engine FP8 | Float8LinearConverter | N/A | N/A | N/A | Triton FP8 kernel | N/A |
+| **FP4 支持** | NVFP4 | N/A | N/A | N/A | N/A | N/A | N/A |
+| **MoE 实现** | MoELayer + TopKRouter | N/A | MoE + TopKGate | 继承 Megatron | 继承 Megatron | Fused MoE Triton | N/A |
+| **RL 支持** | 仅训练后端 | TitanRL 实验 | N/A | GRPO/PPO 完整 | GRPO/PPO + Agentic | N/A | N/A |
+| **Weight Sync** | N/A | N/A | N/A | UpdateWeight | UpdateWeightFromDistributed | N/A | N/A |
+| **Rollout 引擎** | N/A | N/A | N/A | SGLang | SGLang | N/A | N/A |
+| **True On-Policy** | N/A | N/A | N/A | true_on_policy/ | N/A | N/A | N/A |
+| **Checkpoint** | Dist checkpointing | DCP (Distributed CP) | checkpoint_engine | 继承后端 | 继承后端 | N/A | N/A |
+| **编译** | N/A | torch.compile | compile | 继承后端 | 继承后端 | N/A | Inductor |
+| **硬件支持** | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | Ada/RTX + MUSA | MUSA GPU |
+| **Ray 编排** | N/A | N/A | N/A | 完整支持 | 完整支持 | N/A | N/A |
+| **Fault Tolerance** | 基础容错 | N/A | N/A | 完整 FT | 基础容错 | N/A | N/A |
+| **内存优化** | ZeRO-1 + Recompute | FSDP2 + AC | ZeRO-3 + Offload | 继承后端 | 继承后端 | Graph Rotation | CachingAllocator |
+| **配置系统** | argparse + ConfigContainer | tyro-based | JSON ds_config | argparse | argparse | env vars | env vars |
+
+---
+
+## 9. "遇到问题时查哪里" 路由表
 
 | 问题类型 | 首选仓库 | 关键文件 | 说明 |
 |---------|---------|---------|------|
@@ -753,10 +860,14 @@ torch.compile()
 | **FSDP2 原理** | torchtitan | `distributed/fsdp.py:168` | DTensor-based FSDP2 |
 | **DeviceMesh 构建** | torchtitan | `distributed/parallel_dims.py:211` | build_mesh() |
 | **ZeRO-1 优化器** | Megatron-LM | `core/optimizer/distrib_optimizer.py:113` | DistributedOptimizer |
+| **ZeRO-2/3 优化器** | DeepSpeed | `deepspeed/runtime/zero/stage_1_and_2.py:134` | DeepSpeedZeroOptimizer |
+| **ZeRO-3 Offload** | DeepSpeed | `deepspeed/runtime/zero/stage3.py` | DeepSpeedZeRoOffload |
+| **CPU Adam** | DeepSpeed | `deepspeed/ops/adam/cpu_adam.py` | DeepSpeedCPUAdam |
 | **DDP grad sync** | Megatron-LM | `core/distributed/distributed_data_parallel.py:87` | bucket reduce-scatter |
 | **Activation Checkpoint** | torchtitan | `distributed/activation_checkpoint.py:166` | FullAC / SelectiveAC / MemoryBudgetAC |
 | **Recompute 实现** | Megatron-LM | `core/recompute.py:22` | checkpointed_forward |
 | **MoE 路由** | Megatron-LM | `core/transformer/moe/moe_layer.py:625` | TopKRouter + token dispatch |
+| **MoE EP Router** | DeepSpeed | `deepspeed/moe/ep_router.py:27` | TokenChoiceTopKRouter |
 | **MoE Fused Kernel** | torchada | `triton/runtime/fused_moe/fused_moe.py:331` | Triton fused_experts_impl |
 | **FP8 量化** | torchada | `triton/kernels/quant/fp8.py:55` | per_token_group_quant_fp8 |
 | **FP8 训练** | Megatron-LM | `core/transformer/transformer_config.py:588` | FP8 recipe 配置 |
@@ -793,7 +904,7 @@ torch.compile()
 
 ---
 
-## 9. 仓库间依赖关系
+## 10. 仓库间依赖关系
 
 ```
                     ┌─────────────────────────────────────────────────────┐
@@ -801,41 +912,51 @@ torch.compile()
                     └─────────────────────────────────────────────────────┘
 
   ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-  │   Megatron-LM    │     │   torchtitan     │     │    torchada      │
-  │   (NVIDIA)       │     │   (Meta)         │     │   (NVIDIA Ada)   │
+  │   Megatron-LM    │     │   torchtitan     │     │    DeepSpeed     │
+  │   (NVIDIA)       │     │   (Meta)         │     │   (Microsoft)    │
   │                  │     │                  │     │                  │
-  │  全栈并行参考     │     │  PyTorch-native  │     │  硬件适配层       │
-  │  TP/PP/DP/EP/CP  │     │  FSDP2 + TP + PP │     │  CUDA→MUSA 翻译  │
-  │  ZeRO-1 + FP8    │     │  torch.compile   │     │  Triton Kernels  │
+  │  全栈并行参考     │     │  PyTorch-native  │     │  ZeRO 优化库     │
+  │  TP/PP/DP/EP/CP  │     │  FSDP2 + TP + PP │     │  ZeRO-1/2/3     │
+  │  ZeRO-1 + FP8    │     │  torch.compile   │     │  MoE + PP + Auto │
   └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
            │                        │                        │
-           │ 被 miles/slime 依赖     │ 独立实现                │ 被 torch_musa 依赖
+           │ 被 miles/slime 依赖     │ 独立实现                │ 独立库（封装 PyTorch）
+           │                        │                        │
+           ▼                        ▼                        ▼
+  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+  │      miles       │     │      slime       │     │    torchada      │
+  │   (RL 后训练)     │     │   (RL 后训练)     │     │   (NVIDIA Ada)   │
+  │                  │     │                  │     │                  │
+  │  GRPO/PPO 训练   │     │  GRPO/PPO +      │     │  硬件适配层       │
+  │  双后端(FSDP/MT)  │     │  Agentic RL      │     │  CUDA→MUSA 翻译  │
+  │  SGLang Rollout  │     │  SGLang Rollout  │     │  Triton Kernels  │
+  │  True On-Policy  │     │  Observability   │     │                  │
+  └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
+           │                        │                        │
+           │ 共享 SGLang 依赖        │ 共享 SGLang 依赖        │ 被 torch_musa 依赖
            │                        │                        │ (可选)
            ▼                        ▼                        ▼
   ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-  │      miles       │     │      slime       │     │   torch_musa     │
-  │   (RL 后训练)     │     │   (RL 后训练)     │     │  (MUSA GPU)      │
-  │                  │     │                  │     │                  │
-  │  GRPO/PPO 训练   │     │  GRPO/PPO +      │     │  C++ 后端实现     │
-  │  双后端(FSDP/MT)  │     │  Agentic RL      │     │  Device/Stream/  │
-  │  SGLang Rollout  │     │  SGLang Rollout  │     │  Event/Allocator │
-  │  True On-Policy  │     │  Observability   │     │  MCCL 通信       │
-  └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
-           │                        │                        │
-           │ 共享 SGLang 依赖        │ 共享 SGLang 依赖        │ 独立 C++ 栈
-           │                        │                        │
-           ▼                        ▼                        ▼
-  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-  │     SGLang       │     │   (外部依赖)      │     │  Moore Threads   │
-  │  (推理引擎)       │     │   vLLM / HF      │     │  MUSA GPU 硬件   │
+  │     SGLang       │     │   (外部依赖)      │     │   torch_musa     │
+  │  (推理引擎)       │     │   vLLM / HF      │     │  (MUSA GPU)      │
   │                  │     │   transformers    │     │                  │
-  │  Rollout 生成    │     │                  │     │  MTT S5000 等    │
-  │  KV Cache 管理   │     │                  │     │                  │
-  └──────────────────┘     └──────────────────┘     └──────────────────┘
+  │  Rollout 生成    │     │                  │     │  C++ 后端实现     │
+  │  KV Cache 管理   │     │                  │     │  Device/Stream/  │
+  └──────────────────┘     └──────────────────┘     │  Event/Allocator │
+                                                     │  MCCL 通信       │
+                                                     └────────┬─────────┘
+                                                              │
+                                                              ▼
+                                                     ┌──────────────────┐
+                                                     │  Moore Threads   │
+                                                     │  MUSA GPU 硬件   │
+                                                     │  MTT S5000 等    │
+                                                     └──────────────────┘
 
 依赖关系说明：
   - Megatron-LM ← miles, slime (作为训练后端)
   - torchtitan 独立，不依赖其他仓
+  - DeepSpeed 独立库，封装 PyTorch 训练循环，可与 Megatron 配合使用
   - torchada ← torchada 的 MUSA 部分依赖 torch_musa 的 C++ 算子
   - torch_musa 独立 C++ 栈，torchada 可选依赖
   - miles ↔ slime 共享架构模式（Ray + SGLang + Megatron），但独立实现

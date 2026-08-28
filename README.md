@@ -61,7 +61,9 @@ training-crucible/
 │   ├── post-training.md             #   SFT · DPO · RLHF
 │   ├── rl.md                       #   GRPO · PPO · rollout generation
 │   ├── inference.md                #   KV Cache · Quantization · Speculative decoding
-│   └── hardware-adapter.md         #   Hardware adapter layer (torchada + torch_musa)
+│   ├── hardware-adapter.md         #   Hardware adapter layer (torchada + torch_musa)
+│   ├── moe.md                      #   MoE cross-repo deep analysis
+│   └── deepspeed.md                #   DeepSpeed deep analysis
 ├── skill-precision/                      # Precision expert
 │   ├── SKILL.md                    #   Capture → Classify → Localize → Hypothesize → Resolve
 │   └── references/                 #   Failure taxonomy · Known patterns
@@ -73,7 +75,7 @@ training-crucible/
 │   ├── TEMPLATE.md                 #   YAML frontmatter + 8 body sections
 │   └── *.md                        #   Seed cases from real project experience
 └── skill-references/                     # Shared references
-    ├── source-repo-map.md          #   9 repos → stage mapping
+    ├── source-repo-map.md          #   7 repos → stage mapping
     ├── training-glossary.md        #   90 canonical terms
     └── answer-conventions.md       #   Answer conventions + output templates
 ```
@@ -100,12 +102,13 @@ Every technical claim cites a **local source repo** (file path + line number) as
 
 | Repo | Stage | Hardware |
 |------|-------|----------|
-| Megatron-LM | Pre-training, Post-training | NVIDIA GPU |
+| Megatron-LM | Pre-training, Post-training, MoE | NVIDIA GPU |
 | torchtitan | Pre-training, RL | NVIDIA GPU |
+| DeepSpeed | Pre-training optimization (ZeRO/MoE/PP) | NVIDIA GPU |
 | miles | RL (GRPO/PPO) | NVIDIA GPU |
 | slime | RL (GRPO/PPO) | NVIDIA GPU |
-| torchada | Pre-training | NVIDIA Ada GPU |
-| torch_musa | Pre-training | Moore Threads MUSA GPU |
+| torchada | Pre-training, Hardware adapter | NVIDIA Ada GPU |
+| torch_musa | Pre-training, Hardware backend | Moore Threads MUSA GPU |
 
 ---
 
@@ -113,7 +116,7 @@ Every technical claim cites a **local source repo** (file path + line number) as
 
 | Module | Files | Lines | Core |
 |--------|-------|-------|------|
-| Knowledge | 5 | ~3821 | 5-stage knowledge Q&A (pretraining + RL + post-training + inference + hardware-adapter) |
+| Knowledge | 7 | ~5244 | 7-file knowledge Q&A (pretraining + RL + post-training + inference + hardware-adapter + MoE + DeepSpeed) |
 | Precision | 3 | ~1500 | 5-step diagnosis + failure taxonomy + known patterns |
 | Performance | 3 | ~1800 | 5-step optimization + bottleneck taxonomy + SOTA techniques |
 | Tickets | 7 | ~490 | Template + SKILL.md + 5 seed cases |

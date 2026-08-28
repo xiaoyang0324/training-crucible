@@ -321,17 +321,57 @@ CP 将长序列切分到多个 GPU，每个 GPU 处理序列的一个 chunk。At
 | `parallel_dims.py:211` | `build_mesh()` | CP mesh 维度构建 |
 | `distributed/context_parallel.py` | `prepare_context_parallel_input()` | CP 输入准备 |
 
-### 2.5 EP (Expert Parallel)
+### 2.5 EP (Expert Parallel) 与 MoE
 
 #### 概念原理
 
 EP 将 MoE 层的专家分布到不同 GPU，每个 GPU 持有部分专家。Token 通过 router 分配到对应专家的 GPU 上，需要 all-to-all 通信。
 
+**MoE 完整数据流**（详见 `moe.md`）：
+
+```
+Input [S, B, H]
+  → Router (Linear + TopK) → routing_map [T, E]
+  → Token Dispatch (AllGather / AllToAll) → 分发到对应 expert 的 GPU
+  → Expert Compute (FFN)
+  → Token Combine (AllGather / AllToAll) → 汇总回原 GPU
+  → Weighted Combine → Output [S, B, H]
+```
+
+**MoE 三大核心子系统**（每个都有独立的代码级分析，见 `moe.md`）：
+
+| 子系统 | 功能 | 关键技术 |
+|--------|------|----------|
+| Router | 决定 token 去哪个 expert | TopK / TokenChoice / ExpertChoice |
+| Load Balancing | 避免 expert 闲置/过载 | Aux Loss / Z-Loss / Sinkhorn / Expert Bias |
+| Token Dispatch | 跨 GPU 分发/汇总 token | AllGather / AllToAll / HybridEP |
+
 #### Megatron-LM 实现
+
+**MoE 层调用链**：
+
+```
+TransformerLayer._forward_mlp()
+  → moe_layer.py:625  MoELayer.forward()
+       ├─ router.py:849  TopKRouter.routing()      # TopK + expert bias + aux loss
+       │    ├─ router.py:750  _apply_expert_bias()  # 可训练偏置（DeepSeek-V3 风格）
+       │    ├─ router.py:646  apply_z_loss()        # z-loss 正则
+       │    └─ router.py:284  sinkhorn_load_balancing()  # Sinkhorn 平衡
+       ├─ token_dispatcher.py:64  MoETokenDispatcher.token_dispatch()
+       │    ├─ MoEAllGatherTokenDispatcher   # AllGather 模式
+       │    └─ MoEAlltoAllTokenDispatcher   # AllToAll 模式
+       └─ experts.py  MLPExperts.forward()     # 本地 expert 计算
+```
+
+**关键类表**：
 
 | 文件:行号 | 类 | 职责 |
 |-----------|-----|------|
 | `moe/moe_layer.py:625` | `MoELayer.forward()` | MoE 层前向：route → dispatch → compute → combine |
+| `moe/router.py:148` | `TopKRouter` | TopK 路由 + aux loss + z-loss + sinkhorn |
+| `moe/router.py:750` | `_apply_expert_bias()` | 可训练 expert 偏置（noaux_tc） |
+| `moe/token_dispatcher.py:233` | `MoEAllGatherTokenDispatcher` | AllGather 分发模式 |
+| `moe/token_dispatcher.py:375` | `MoEAlltoAllTokenDispatcher` | AllToAll 分发模式 |
 | `parallel_state.py:610` | `expert_model_parallel_size` | EP 组大小配置 |
 
 #### torchtitan 实现
@@ -340,6 +380,17 @@ EP 将 MoE 层的专家分布到不同 GPU，每个 GPU 持有部分专家。Tok
 |-----------|-----|------|
 | `parallel_dims.py:139` | `ParallelDims.ep` | EP 维度配置 |
 | `models/common/token_dispatcher.py` | `HybridEPTokenDispatcher` / `MinimalAsyncEPTokenDispatcher` | Token 分发器 |
+
+#### DeepSpeed 实现
+
+| 文件:行号 | 类 | 职责 |
+|-----------|-----|------|
+| `deepspeed/moe/layer.py:17` | `MoE` | MoE 层封装 |
+| `deepspeed/moe/sharded_moe.py:474` | `TopKGate` | TopK 门控 |
+| `deepspeed/moe/sharded_moe.py:563` | `MOELayer` | MoE 层前向 |
+| `deepspeed/moe/ep_router.py:27` | `TokenChoiceTopKRouter` | Token-choice 路由（ported from torchtitan） |
+
+> **深入分析见 `moe.md`**：包含 Router 类型对比、Load Balancing 四级技术（Aux Loss/Z-Loss/Sinkhorn/Expert Bias）、三种 Token Dispatch 通信模式的 ASCII 图、以及 18 维度 × 4 仓库对比总表。
 
 ### 2.6 DP / FSDP (Data Parallel)
 
