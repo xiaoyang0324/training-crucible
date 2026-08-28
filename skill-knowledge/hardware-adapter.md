@@ -6,6 +6,65 @@
 
 ---
 
+## 0. 硬件适配层全景图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              硬件适配层全景图                                              │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                         用户代码 (SGLang / vLLM / Megatron)                      │    │
+│  │                         调用 torch.cuda.* / CUDAExtension / Triton              │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │ import torchada                                   │
+│                                   ▼                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          torchada (CUDA→MUSA Shim)                               │    │
+│  │                                                                                 │    │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │    │
+│  │  │ _patch 引擎  │  │ _platform    │  │ _cpp_ops     │  │ _graph_rotation  │    │    │
+│  │  │ 16 个 patch  │  │ 平台检测     │  │ C++ op 覆盖  │  │ LRU rotation     │    │    │
+│  │  │ :2103 apply  │  │ :21 detect   │  │ :73 load     │  │ :138 _Rotation   │    │    │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────────┘    │    │
+│  │  ┌──────────────────────────────┐  ┌──────────────────────────────────────────┐  │    │
+│  │  │ Triton Kernels               │  │ utils/cpp_extension.py                   │  │    │
+│  │  │ FP8 quant / Fused MoE       │  │ CUDAExtension → MUSAExtension            │  │    │
+│  │  └──────────────────────────────┘  └──────────────────────────────────────────┘  │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          torch_musa (MUSA PyTorch Backend)                       │    │
+│  │                                                                                 │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │    │
+│  │  │ Device   │ │ Memory   │ │ Stream   │ │ Event    │ │ Graph    │ │ MCCL   │  │    │
+│  │  │ Device.cpp│ │CachingAllc│ │Stream.cpp│ │Event.h   │ │MUSAGraph │ │Process │  │    │
+│  │  │ :27      │ │:3755 alloc│ │:17 pool  │ │          │ │:65 begin │ │Group   │  │    │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └────────┘  │    │
+│  │  ┌──────────────────────────────┐  ┌──────────────────────────────────────────┐  │    │
+│  │  │ Inductor Codegen             │  │ Distributed                              │  │    │
+│  │  │ MUSATritonWrapperCodeGen     │  │ DeviceMesh / FSDP / DTensor              │  │    │
+│  │  └──────────────────────────────┘  └──────────────────────────────────────────┘  │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          MUSA GPU 硬件                                           │    │
+│  │                         摩尔线程 GPU (S5000 / S4000 / S3000 系列)                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**关键数据流**：
+1. `import torchada` → `apply_patches()` 全局 monkey-patch
+2. 用户 `torch.cuda.*` 调用 → 透明重定向到 `torch.musa.*`
+3. Graph Rotation 拦截 `MUSAGraph.capture_end/replay` → LRU 管理 live executable
+4. Triton kernel 直接运行在 MUSA 上（FP8 quant / Fused MoE）
+
+---
+
 ## 1. torchada — CUDA→MUSA 兼容层
 
 ### 1.1 整体架构与设计理念
@@ -839,49 +898,7 @@ torch_musa (PyTorch backend)
 
 ---
 
-## 6. 源码文件索引
-
-### torchada 核心文件
-
-| 文件 | 行数 | 核心内容 |
-|---|---|---|
-| `src/torchada/__init__.py` | 114 | 入口：`load_cpp_ops()`, `apply_patches()` |
-| `src/torchada/_patch.py` | ~2220 | 16 个 patch 函数 + `apply_patches()` |
-| `src/torchada/_platform.py` | 194 | `Platform` 枚举, `detect_platform()` |
-| `src/torchada/_cpp_ops.py` | 239 | `load_cpp_ops()`, `load_graph_rotation_ops()` |
-| `src/torchada/_graph_rotation.py` | 304 | `_Rotation` 类, `install()` |
-| `src/torchada/_runtime.py` | 133 | 函数名翻译工具 |
-| `src/torchada/csrc/ops.cpp` | ~100 | C++ ATen op 覆盖 |
-| `src/torchada/_graph_rotation_src/graph_exec_aux.cpp` | ~60 | `free_exec`/`inst_exec` C++ 实现 |
-| `src/torchada/triton/kernels/quant/fp8.py` | 282 | FP8/INT8 quant kernels |
-| `src/torchada/triton/runtime/fused_moe/router.py` | 459 | TopK/MoE routing |
-| `src/torchada/triton/runtime/fused_moe/fused_moe.py` | ~500 | Fused MoE kernel |
-| `src/torchada/triton/autotune/fused_moe/__init__.py` | ~120 | MoE 配置系统 |
-| `src/torchada/utils/cpp_extension.py` | ~1450 | `CUDAExtension`, `load()`, `BuildExtension` |
-| `src/torchada/cuda/__init__.py` | ~50 | CUDA 兼容 API 模块 |
-
-### torch_musa 核心文件
-
-| 文件 | 行数 | 核心内容 |
-|---|---|---|
-| `torch_musa/__init__.py` | ~296 | 18 步启动序列 |
-| `torch_musa/core/Device.cpp` | ~27 | `current_device`, `set_device`, `Synchronize` |
-| `torch_musa/core/GuardImpl.h` | ~250 | `MUSAGuardImpl` 完整实现 |
-| `torch_musa/core/MUSACachingAllocator.cpp` | ~4000+ | 内存分配器核心（152KB） |
-| `torch_musa/core/MUSAStream.cpp` | ~200+ | Stream pool 管理 |
-| `torch_musa/core/MUSAEvent.h` | ~100+ | Event 结构定义 |
-| `torch_musa/core/PythonMCCL.cpp` | ~19 | MCCL 版本查询 |
-| `torch_musa/csrc/aten/musa/MUSAGraph.cpp` | ~200+ | Graph capture C++ 实现 |
-| `torch_musa/musa_graph/graphs.py` | ~100+ | MUSAGraph Python 包装 |
-| `torch_musa/_inductor/codegen/wrapper.py` | ~200+ | `MUSATritonWrapperCodeGen` |
-| `torch_musa/_inductor/musagraph_trees.py` | ~3000+ | MUSA Graph Trees（121KB） |
-| `torch_musa/distributed/__init__.py` | ~40 | `_apply_distributed_patch()` |
-| `torch_musa/distributed/device_mesh.py` | ~51 | DeviceMesh patch |
-| `torch_musa/distributed/fsdp/sharded_grad_scaler.py` | ~200+ | FSDP ShardedGradScaler |
-
----
-
-## 7. 面试高频问题速查
+## 6. 面试高频问题速查
 
 **Q: torchada 和 torch_musa 的关系？**
 A: torchada 是跑在 torch_musa 之上的 CUDA→MUSA 兼容层。torch_musa 提供底层硬件后端（Device/Memory/Stream/Graph/MCCL），torchada 通过 monkey-patch 让 CUDA 代码透明运行。
@@ -897,6 +914,79 @@ A: 红黑树 pool + 双向链表，支持 split/coalesce，类似 PyTorch 的 CU
 
 **Q: torchada 的 patch 引擎设计模式？**
 A: 注册表模式（Registry Pattern），类似 Flask `@app.route`。`@patch_function` 收集函数到 `_patch_registry`，`apply_patches()` 按顺序执行。
+
+---
+
+## 7. 硬件适配层完整调用链总图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                     CUDA→MUSA 适配层完整调用链（训练/推理通用）                             │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │ Step 1: import torchada → apply_patches() 全局 monkey-patch                     │    │
+│  │                                                                                 │    │
+│  │   _patch.py:2103 apply_patches()                                                │    │
+│  │     → for func in _patch_registry: func()                                       │    │
+│  │     → _patch_flash_attn()      → flash_attn_func 重定向                         │    │
+│  │     → _patch_cuda_graph()      → MUSAGraph 替换 CUDAGraph                       │    │
+│  │     → _patch_cuda_extension()  → CUDAExtension → MUSAExtension                  │    │
+│  │     → ... 共 16 个 @patch_function                                              │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │ Step 2: torch_musa.__init__ → 18 步启动序列                                      │    │
+│  │                                                                                 │    │
+│  │   __init__.py: → _lazy_init() → _apply_patches() → overwrite_cuda_api()        │    │
+│  │   → Device 注册 → Memory allocator 初始化 → Stream pool 创建                    │    │
+│  │   → MCCL 加载 → Graph backend 初始化 → Inductor codegen 注册                   │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │ Step 3: 运行时调用路径（以模型前向为例）                                          │    │
+│  │                                                                                 │    │
+│  │   model.forward(input)                                                          │    │
+│  │     │                                                                           │    │
+│  │     ├─ torch.cuda.device_count()  → 重定向 → Device.cpp:27 device_count()       │    │
+│  │     │                                                                           │    │
+│  │     ├─ torch.cuda.Stream()        → 重定向 → MUSAStream.cpp stream pool        │    │
+│  │     │                                                                           │    │
+│  │     ├─ flash_attn_func(...)       → _patch.py:1495 → flash_attn_interface      │    │
+│  │     │                                                                           │    │
+│  │     ├─ per_token_group_quant_fp8() → Triton kernel :12 (MUSA 上运行)            │    │
+│  │     │                                                                           │    │
+│  │     ├─ fused_moe(...)             → fused_moe.py:435 → Triton GEMM             │    │
+│  │     │                                                                           │    │
+│  │     └─ dist.all_reduce(...)       → ProcessGroupMCCL.cpp:4026 (MCCL 后端)      │    │
+│  │                                                                                 │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │ Step 4: Graph Capture 路径（推理优化）                                            │    │
+│  │                                                                                 │    │
+│  │   MUSAGraph.capture_begin()      → musagraph.cpp:65 (C++)                       │    │
+│  │     → 记录所有 MUSA kernel 到 graph                                               │    │
+│  │   MUSAGraph.capture_end()        → musagraph.cpp:140                            │    │
+│  │     → _graph_rotation.py:284 → rot.register(graph)                              │    │
+│  │     → 若 live_exec > 1900 → _evict_locked() 驱逐 LRU                            │    │
+│  │   MUSAGraph.replay()             → musagraph.cpp:219                            │    │
+│  │     → _graph_rotation.py:292 → rot.on_replay(graph)                             │    │
+│  │     → 若已驱逐 → aux.inst_exec(graph) 重实例化 (~0.3ms)                         │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**关键性能数据**：
+- Graph Rotation 默认上限：`_DEFAULT_CAP = 1900`（`_graph_rotation.py:44`）
+- 重实例化开销：~0.3ms per graph
+- Stream pool：`kStreamsPerPool = 32`（`MUSAStream.cpp:17`）
+- 内存分配器：红黑树 pool + 双向链表，支持 split/coalesce
 
 ---
 
@@ -972,4 +1062,38 @@ A: 注册表模式（Registry Pattern），类似 Flask `@app.route`。`@patch_f
 
 ---
 
-> **文档统计**：本文档覆盖 torchada + torch_musa 两个项目，包含 80+ 处 file:line 源码引用、4 条完整调用链、3 幅 ASCII 架构图、8 张对比/参数表、1 个源码文件索引附录（60+ 文件）。
+## 附录 B：工作实战要点速查
+
+| 场景 | 查哪里 | 关键代码 |
+|------|--------|---------|
+| 启用 torchada 兼容层 | `import torchada` | `__init__.py` → `apply_patches()` |
+| Graph Rotation 调优 | `_Rotation` 参数 | `_graph_rotation.py:44` `_DEFAULT_CAP=1900` |
+| FP8 量化 kernel | `per_token_group_quant_fp8()` | `fp8.py:55` |
+| Fused MoE 推理 | `fused_experts_impl()` | `fused_moe.py:331` |
+| CUDA Extension 移植 | `CUDAExtension` → `MUSAExtension` | `cpp_extension.py` |
+| MUSA 设备管理 | `device_count()` / `set_device()` | `Device.cpp:27` |
+| 内存分配器配置 | `PYTORCH_MUSA_ALLOC_CONF` | `__init__.py:236` |
+| MCCL 通信 | `ProcessGroupMCCL` | `ProcessGroupMCCL.cpp:4026` |
+| MUSA Graph 捕获 | `MUSAGraph.capture_begin()` | `musagraph.cpp:65` |
+| Inductor codegen | `MUSATritonWrapperCodeGen` | `_inductor/codegen/wrapper.py` |
+| FSDP on MUSA | `ShardedGradScaler` | `distributed/fsdp/sharded_grad_scaler.py` |
+| 平台检测 | `detect_platform()` | `_platform.py:21` |
+
+---
+
+## 附录 C：常见坑与解决方案
+
+| 问题现象 | 根因 | 解决方案 | 代码位置 |
+|---------|------|---------|---------|
+| Graph Rotation 驱逐频繁 | `_DEFAULT_CAP` 设置过高/过低 | 调整 `_DEFAULT_CAP` / `_DEFAULT_MARGIN` | `_graph_rotation.py:44-45` |
+| MUSA Graph capture 失败 | 动态 shape / 数据依赖 | 固定输入 shape，避免动态控制流 | `musagraph.cpp:65` |
+| FP8 quant kernel 报错 | group size 不匹配 | 检查 `block_shape` 对齐 | `fp8.py:55` |
+| MCCL 通信超时 | 进程组配置错误 | 检查 `MUSA_VISIBLE_DEVICES` | `ProcessGroupMCCL.cpp` |
+| torchada patch 失效 | import 顺序错误 | 确保 `import torchada` 在最前 | `__init__.py` |
+| Inductor codegen 报错 | MUSA 不支持的算子 | 检查 `_inductor` 兼容性列表 | `_inductor/codegen/wrapper.py` |
+
+> **交叉引用**：MUSA 推理优化详见 `skill-knowledge/inference.md`；MoE Fused Kernel 详见 `skill-knowledge/moe.md`；PyTorch CUDA Graph 对比详见 `skill-knowledge/pytorch.md`。
+
+---
+
+> **文档统计**：本文档覆盖 torchada + torch_musa 两个项目，包含 80+ 处 file:line 源码引用、4 条完整调用链、3 幅 ASCII 架构图、8 张对比/参数表、3 个附录（60+ 文件）。

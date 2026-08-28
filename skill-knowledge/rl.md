@@ -1387,4 +1387,36 @@ UpdateWeight.update_weights()                       # update_weight_utils.py:70
 
 ---
 
-> **文档统计**：本文档覆盖 RL 训练系统 11 个核心模块，包含 80+ 处 file:line 源码引用、6 条完整调用链、3 幅 ASCII 架构图、2 张跨仓库对比表、1 张配置参数表、1 份源码文件索引附录。
+## 附录 B：工作实战要点速查
+
+| 场景 | 查哪里 | 关键代码 |
+|------|--------|---------|
+| 切换 GRPO/PPO 算法 | `advantages.py:16` `compute_advantages()` | 设置 `--advantage-estimator` |
+| 调整 KL 估计器类型 | `compute_approx_kl()` | `math_utils.py:139` (miles) / `ppo_utils.py:100` (slime) |
+| 开启 off-policy 校正 | `vanilla_tis_function()` | `corrections.py:7` / `loss.py:883` |
+| 自定义奖励函数 | `rm_hub/__init__.py:43` `async_rm()` | miles Reward Hub |
+| 权重同步瓶颈 | `UpdateWeight.update_weights()` | `update_weight_utils.py:70` |
+| CP 场景 log-prob 计算 | `get_logits_and_tokens_offset_with_cp()` | `cp_utils.py:19` (miles) / `:9` (slime) |
+| Rollout 健康监控 | `RolloutHealthMonitor` | `health_monitor.py:11` (miles) / `:9` (slime) |
+| 异步训练模式 | `train_async.py` | miles: `:22` / slime: `:10` |
+| 添加新的 advantage 算法 | `advantages.py:16` → 注册新分支 | 扩展 `compute_advantages()` |
+| 调试 loss NaN | `policy_loss_function()` → `compute_policy_loss()` | `losses.py:62` / `math_utils.py:254` |
+
+---
+
+## 附录 C：常见坑与解决方案
+
+| 问题现象 | 根因 | 解决方案 | 代码位置 |
+|---------|------|---------|---------|
+| GRPO loss 震荡 | KL 系数过大 / 学习率过高 | 降低 `--kl-coef` 或 `--lr` | `arguments.py` |
+| Rollout 超时 | 推理引擎吞吐不足 | 调整 `rollout_batch_size` / 增加 TP | `rollout_manager.py` |
+| 权重同步慢 | FSDP gather 未分桶 | 启用分桶传输 `update_weights()` | `update_weight_utils.py:70` |
+| CP 场景 token 错位 | zigzag 重分布错误 | 检查 `_build_shifted_tokens()` | `loss.py:273` (slime) |
+| Off-policy 校正后 loss 爆炸 | IS 权重过大 | 启用 TIS clamp `--tis-clip` | `arguments.py:1060` |
+| Advantage 全零 | 组内 reward 完全相同 | 检查 reward 函数 / 增加采样多样性 | `advantages.py:16` |
+
+> **交叉引用**：RL 中的 MoE 应用详见 `skill-knowledge/moe.md`；后训练 SFT/DPO 详见 `skill-knowledge/post-training.md`；推理引擎详见 `skill-knowledge/inference.md`。
+
+---
+
+> **文档统计**：本文档覆盖 RL 训练系统 11 个核心模块，包含 80+ 处 file:line 源码引用、6 条完整调用链、3 幅 ASCII 架构图、2 张跨仓库对比表、1 张配置参数表、3 份附录。

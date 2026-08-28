@@ -5,6 +5,74 @@
 
 ---
 
+## 0. MoE 全景图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              MoE 训练/推理全景图                                          │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  Input Tokens [S, B, H]                                                                 │
+│       │                                                                                 │
+│       ▼                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          Router（路由决策）                                        │    │
+│  │                                                                                 │    │
+│  │   TopK Router          Token Choice         Expert Choice                        │    │
+│  │   router.py:750        (DeepSpeed)          (DeepSeek-V3)                        │    │
+│  │   scores = softmax(Wx)  expert选topN token    expert作为query                    │    │
+│  │   topk(scores, k)      反向路由               token作为cand                     │    │
+│  │                                                                                 │    │
+│  │   + Load Balancing: Aux Loss / Z-Loss / Sinkhorn / Expert Bias                   │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │ topk_ids, topk_weights                              │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          Token Dispatch（Token 分发）                              │    │
+│  │                                                                                 │    │
+│  │   AllGather              AllToAll               HybridEP                          │    │
+│  │   (Megatron)            (DeepSpeed)            (DeepSeek)                        │    │
+│  │   本地计算所有expert     跨节点交换token         节点内AG + 节点间ATA             │    │
+│  │   token_dispatcher.py    AllToAllDispatcher      group_limited_gather             │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          Expert Computation（专家计算）                            │    │
+│  │                                                                                 │    │
+│  │   Standard FFN          Fused MoE (Triton)       Grouped GEMM (CUDA)            │    │
+│  │   MLP.forward()         fused_experts_impl()      grouped_topk()                │    │
+│  │   mlp.py:257            fused_moe.py:331          router.py:383                 │    │
+│  │                                                                                 │    │
+│  │   Gate → Act → Down    Triton autotuned GEMM      cuBLAS grouped GEMM           │    │
+│  └────────────────────────────────┬────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          Combine（结果合并）                                       │    │
+│  │                                                                                 │    │
+│  │   output = Σ(topk_weights[i] * expert_output[i])                                │    │
+│  │   weighted sum of expert outputs                                                │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                   │                                                     │
+│                                   ▼                                                     │
+│                            Output Tokens [S, B, H]                                      │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**四仓库 MoE 支持对比**：
+
+| 特性 | Megatron-LM | DeepSpeed | torchtitan | torchada |
+|------|-------------|-----------|------------|----------|
+| Router | TopK / TokenChoice | TokenChoiceTopK | TopK | TopK (Triton) |
+| Load Balancing | Aux Loss + Z-Loss | Aux Loss | Aux Loss | — |
+| Token Dispatch | AllGather / AllToAll | AllToAll | AllGather | — |
+| Fused Kernel | — | — | — | Triton Fused MoE |
+| Expert Parallel | ✓ (EP) | ✓ (EP) | — | — |
+
+---
+
 ## 1. MoE 概念原理
 
 ### 1.1 核心思想
@@ -978,4 +1046,36 @@ padded_tokens = (
 
 ---
 
-> **文档统计**：覆盖 4 个仓库，≥50 个 `file:line` 引用，4 条完整调用链，4 个 ASCII 架构图，4 个跨仓库对比表，3 个配置参数表，1 个源码文件索引附录。所有代码引用均来自真实源码验证。
+## 附录 B：工作实战要点速查
+
+| 场景 | 查哪里 | 关键代码 |
+|------|--------|---------|
+| 添加新专家（增加 expert 数） | `transformer_config.py:240` `num_moe_experts` | Megatron-LM |
+| 调整 TopK 路由 | `moe_router_topk` | `transformer_config.py:761` |
+| 开启 Aux Loss 负载均衡 | `_apply_aux_loss()` | `router.py:414` |
+| 切换 Token Dispatch 策略 | `MoEAllGatherTokenDispatcher` vs `AlltoAll` | `token_dispatcher.py:233/375` |
+| EP（专家并行）配置 | `expert_parallel_degree` | `parallel_dims.py:139` |
+| Fused MoE kernel 调优 | `fused_experts_impl()` | `fused_moe.py:331` (torchada) |
+| FP8 MoE 量化 | `per_token_group_quant_fp8()` | `fp8.py:55` |
+| MoE 推理优化 | `moe_align_block_size()` | `fused_moe.py:29` |
+| 调试负载不均 | `sinkhorn_load_balancing()` | `router.py:284` |
+| DeepSpeed MoE 配置 | `TopKGate` + `TokenChoiceTopKRouter` | `sharded_moe.py:474` / `ep_router.py:27` |
+
+---
+
+## 附录 C：常见坑与解决方案
+
+| 问题现象 | 根因 | 解决方案 | 代码位置 |
+|---------|------|---------|---------|
+| 部分 expert 闲置（负载不均） | Aux Loss 系数过小 | 增大 `moe_aux_loss_coeff` | `router.py:414` |
+| Token Dispatch 通信瓶颈 | AllToAll 跨节点带宽不足 | 改用 HybridEP（节点内 AG + 节点间 ATA） | `expert_parallel.py:891` |
+| MoE 推理 OOM | 所有 expert 同时驻存 | 启用 EP 分片 / expert offloading | `moe_layer.py` |
+| Fused MoE kernel 报错 | block size 不匹配 | 检查 `moe_align_block_size()` 对齐 | `fused_moe.py:29` |
+| Router 梯度消失 | softmax 饱和 | 启用 z-loss / input jitter | `router.py:153/715` |
+| EP 场景 AllGather 超时 | expert 分布不均 | 启用 Sinkhorn 负载均衡 | `router.py:284` |
+
+> **交叉引用**：MoE 在预训练中的应用详见 `skill-knowledge/pretraining.md`；MoE 在 DeepSpeed 中详见 `skill-knowledge/deepspeed.md`；MoE 推理优化详见 `skill-knowledge/inference.md`。
+
+---
+
+> **文档统计**：覆盖 4 个仓库，≥50 个 `file:line` 引用，4 条完整调用链，4 个 ASCII 架构图，4 个跨仓库对比表，3 个配置参数表，3 个附录。所有代码引用均来自真实源码验证。

@@ -1549,7 +1549,42 @@ load_checkpoint()
 
 ---
 
+## 附录 C：工作实战要点速查
+
+| 场景 | 查哪里 | 关键代码 |
+|------|--------|---------|
+| 训练启动失败（分布式初始化） | `initialize_megatron()` | `initialize.py` → `parallel_state.py:601` |
+| 添加新的并行策略 | `ParallelDims` + `build_mesh()` | `parallel_dims.py:132, 211` |
+| 调整 TP 通信重叠 | `ColumnParallelLinear` | `layers.py:986` + `mappings.py` |
+| 开启 FP8 训练 | `TransformerConfig` fp8 字段 | `transformer_config.py:588` |
+| 激活重计算配置 | `recompute_granularity` / `recompute_method` | `recompute.py:22` |
+| 优化器状态分片（ZeRO-1） | `DistributedOptimizer` | `distrib_optimizer.py:113` |
+| 梯度累积 + 异步通信 | `LinearWithGradAccumulationAndAsyncCommunication` | `layers.py:634` |
+| PP 调度策略切换 | `get_forward_backward_func()` | `schedules.py:53` |
+| Checkpoint 保存/加载 | `save_checkpoint()` / `load_checkpoint()` | `training.py:4700 / 2500` |
+| Float8 量化训练 | `Float8LinearConverter` | `float8.py:53` |
+| 自定义 AC 策略 | `FullAC` / `SelectiveAC` / `MemoryBudgetAC` | `activation_checkpoint.py:166/185/290` |
+| CUDA Graph 捕获模式 | `CUDAGraphWrapper` | `cudagraph.py:189` |
+
+---
+
+## 附录 D：常见坑与解决方案
+
+| 问题现象 | 根因 | 解决方案 | 代码位置 |
+|---------|------|---------|---------|
+| 训练启动报 `NCCL error` | 进程组初始化顺序错误 | 检查 `initialize_megatron()` 调用顺序 | `initialize.py` |
+| Loss NaN（混合精度） | FP16 溢出 / loss scaling 不足 | 启用 FP32 master weights + 动态 loss scale | `fp16_utils.py` |
+| PP 场景 OOM | 多个 microbatch 同时驻存 | 减少 `num_microbatches` 或开启 interleaving | `schedules.py` |
+| TP 通信瓶颈 | AllReduce 未与计算重叠 | 启用 `Sequence Parallel` + async communication | `layers.py:634` |
+| Checkpoint 加载失败 | FQN 映射不一致 | 使用 `use_distributed_optimizer=True` 保持分片一致 | `distrib_optimizer.py:127` |
+| CUDA Graph 捕获失败 | 动态 shape / 数据依赖 | 固定 batch size，避免动态控制流 | `cudagraph.py` |
+| 激活重计算后梯度错误 | 重计算范围与 Dropout 不匹配 | 使用 `uniform` 模式 + 固定随机种子 | `recompute.py:22` |
+
+> **交叉引用**：MoE 并行策略详见 `skill-knowledge/moe.md`；DeepSpeed ZeRO 对比详见 `skill-knowledge/deepspeed.md`；PyTorch 底层机制详见 `skill-knowledge/pytorch.md`。
+
+---
+
 > **文档版本：** v3.0 (代码级深度版 — 含全景图 + 代码片段 + 总调用链 + 源码索引)
 > **生成日期：** 2026-08-28
 > **覆盖框架：** Megatron-LM (NVIDIA) + torchtitan (Meta)
-> **总计：** 11 章 + 2 附录，60+ file:line 引用，12+ 调用链，15+ 对比表，4 个真实代码片段，2 个全景 ASCII 图
+> **总计：** 11 章 + 4 附录，60+ file:line 引用，12+ 调用链，15+ 对比表，4 个真实代码片段，2 个全景 ASCII 图

@@ -737,54 +737,7 @@ def _rewind_kv_cache_kernel(
 
 ---
 
-## 8. 推理优化全调用链（核心路径）
-
-以下展示一个 MoE 模型在 MUSA 上的完整推理优化调用链：
-
-```
-用户请求（prompt tokens）
-    │
-    ▼
-torchada._graph_rotation.install()          ← 启动时注入 graph rotation
-    │  monkey-patch MUSAGraph.capture_end/replay
-    │
-    ▼
-torch_musa.MUSAGraph.capture_begin()        ← 开始图捕获
-    │  C++: musagraph.cpp:65 capture_begin()
-    │  注册 generator state（图安全 RNG）
-    │
-    ▼
-[Capture Phase] Model.forward()
-    │
-    ├─ flash_attn_varlen_func(...)          ← FA 计算
-    │   └─ _patch.py:1495 重定向到 flash_attn_interface
-    │
-    ├─ per_token_group_quant_fp8(x, 128)    ← FP8 量化（如需）
-    │   └─ fp8.py:55 → Triton kernel :12 _per_token_group_quant_8bit
-    │
-    └─ fused_moe(hidden_states, w1, w2, topk)
-        └─ fused_moe.py:435
-           ├─ moe_align_block_size(topk_ids, ...)   ← token-专家分配
-           └─ fused_experts_impl(...)               ← :331 MoE 核心
-              └─ Triton GEMM kernel (autotuned config)
-    │
-    ▼
-MUSAGraph.capture_end()                      ← 图捕获结束
-    │  _graph_rotation.py:284 → rot.register(graph)
-    │  若 live > cap → _evict_locked() 驱逐 LRU executable
-    │
-    ▼
-MUSAGraph.replay()                           ← 推理时重放
-    │  _graph_rotation.py:292 → rot.on_replay(graph)
-    │  若 exec 已被驱逐 → aux.inst_exec(graph) 重实例化
-    │
-    ▼
-输出 tokens
-```
-
----
-
-## 9. 推理完整调用链总图
+## 8. 推理完整调用链总图
 
 下图展示从 input tokens 到 output tokens 的完整推理路径中，各模块的调用关系与数据流向：
 
@@ -884,47 +837,7 @@ MUSAGraph.replay()                           ← 推理时重放
 
 ---
 
-## 10. 源码文件索引
-
-### torchada 推理相关
-
-| 文件路径 | 功能描述 |
-|----------|----------|
-| `torchlorada/src/torchada/_graph_rotation.py` | Graph Rotation LRU 管理（~2048 驱动限制 workaround） |
-| `torchlorada/src/torchada/triton/kernels/quant/fp8.py` | FP8/INT8 per-token-group 量化 Triton kernel |
-| `torchlorada/src/torchada/triton/runtime/fused_moe/fused_moe.py` | Fused MoE 推理核心（Triton GEMM） |
-| `torchlorada/src/torchada/triton/runtime/fused_moe/config.py` | MoE kernel 配置 autotune 与加载 |
-| `torchlorada/src/torchada/_patch.py` | MUSA 适配补丁（flash_attn 重定向等） |
-| `torchlorada/src/torchada/_cpp_ops.py` | C++ 算子扩展加载 + MUSA 架构探测 |
-
-### torch_musa 推理相关
-
-| 文件路径 | 功能描述 |
-|----------|----------|
-| `torch_musa/torch_musa/musa_graph/graphs.py` | MUSAGraph 封装 + make_graphed_callables |
-| `torch_musa/torch_musa/csrc/core/MUSACachingAllocator.cpp` | MUSA 显存分配器（Block 池 + expandable segment） |
-| `torch_musa/torch_musa/csrc/aten/musa/musagraph.cpp` | MUSA Graph C++ 后端（capture/register/replay） |
-
-### Megatron-LM 推理相关
-
-| 文件路径 | 功能描述 |
-|----------|----------|
-| `Megatron-LM/megatron/core/inference/scheduler.py` | 推理请求调度器 |
-| `Megatron-LM/megatron/core/inference/sampling_params.py` | 采样参数定义 |
-| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | PagedAttention block allocator + prefix caching |
-| `Megatron-LM/megatron/core/inference/contexts/dynamic_context.py` | 动态推理上下文（KV/Mamba/CUDA Graph） |
-| `Megatron-LM/megatron/core/inference/contexts/fused_kv_append_kernel.py` | Triton KV append kernel（分页写入） |
-| `Megatron-LM/megatron/core/inference/quantization/mxfp8_quantize.py` | MXFP8 量化 kernel + swizzled scale |
-| `Megatron-LM/megatron/core/inference/quantization/utils.py` | MXFP8 后端选择（TE/FlashInfer/torch） |
-| `Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_triton.py` | 投机解码 KV rewind kernel |
-| `Megatron-LM/megatron/core/inference/model_inference_wrappers/gpt/gpt_inference_wrapper.py` | GPT 模型推理包装器 |
-| `Megatron-LM/megatron/core/inference/disaggregation/engine.py` | 分离式推理引擎 |
-| `Megatron-LM/megatron/core/inference/disaggregation/inference_state_handoff.py` | Prefill/Decode 状态 hand-off |
-| `Megatron-LM/megatron/core/inference/disaggregation/kv_reshard.py` | TP/PP/EP KV 分片重分布 |
-
----
-
-## 11. 面试高频问题与代码对应
+## 9. 面试高频问题与代码对应
 
 | 面试问题 | 代码证据 |
 |----------|----------|
@@ -1013,5 +926,37 @@ MUSAGraph.replay()                           ← 推理时重放
 | `Megatron-LM/megatron/core/inference/disaggregation/kv_reshard.py` | `KVShardLayout` (:14) | TP/PP/EP KV 分片重分布 |
 
 ---
+
+---
+
+## 附录 B：工作实战要点速查
+
+| 场景 | 查哪里 | 关键代码 |
+|------|--------|---------|
+| PagedAttention 配置 | `KVBlockAllocator` | `kv_block_allocator.py:17` |
+| FP8 量化推理 | `per_token_group_quant_fp8()` | `fp8.py:55` (torchada) |
+| Graph Rotation 调优 | `_DEFAULT_CAP` / `_DEFAULT_MARGIN` | `_graph_rotation.py:44-45` |
+| 投机解码 KV 回滚 | `_rewind_kv_cache_kernel()` | `mtp_utils_triton.py:27` |
+| MUSA Graph 捕获 | `MUSAGraph.capture_begin()` | `musagraph.cpp:65` |
+| Fused MoE 推理 | `fused_experts_impl()` | `fused_moe.py:331` |
+| Prefill-Decode 分离 | `DisaggDynamicInferenceEngine` | `disaggregation/engine.py:11` |
+| MXFP8 量化 | `_mxfp8_quant_swizzle_kernel()` | `mxfp8_quantize.py:41` |
+| KV Cache 前缀缓存 | `register_kv_block_hashes()` | `kv_block_allocator.py:315` |
+| 推理调度策略 | `Scheduler` | `scheduler.py:17` |
+
+---
+
+## 附录 C：常见坑与解决方案
+
+| 问题现象 | 根因 | 解决方案 | 代码位置 |
+|---------|------|---------|---------|
+| KV Cache OOM | block 分配碎片化 | 启用 prefix caching + LRU 驱逐 | `kv_block_allocator.py:515` |
+| 投机解码 KV 回滚错误 | `num_to_rewind` 计算错误 | 检查 `_rewind_kv_cache_kernel()` | `mtp_utils_triton.py:27` |
+| Graph Rotation 驱逐频繁 | `_DEFAULT_CAP` 过小 | 增大 cap 或减少模型层数 | `_graph_rotation.py:44` |
+| FP8 quant 精度损失大 | group size 过大 | 减小 `block_shape` | `fp8.py:55` |
+| MUSA Graph replay 失败 | 输入地址变化 | 固定输入 tensor | `musagraph.cpp:219` |
+| Prefill-Decode handoff 超时 | KV 传输带宽不足 | 启用 KV compression | `kv_reshard.py:14` |
+
+> **交叉引用**：MUSA 硬件适配详见 `skill-knowledge/hardware-adapter.md`；MoE 推理详见 `skill-knowledge/moe.md`；RL 训练详见 `skill-knowledge/rl.md`。
 
 > **编写说明**：本文档所有 `torchlorada` / `torch_musa` / `Megatron-LM/` 路径均为本地仓库真实文件，已通过代码阅读验证。vLLM/SGLang 相关内容仅在第 3.4 节作为外部知识引用并明确标注，未编造文件路径。

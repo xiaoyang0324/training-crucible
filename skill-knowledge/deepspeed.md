@@ -1,5 +1,61 @@
 # DeepSpeed — 代码级深度分析
 
+## 0. DeepSpeed 全景图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DeepSpeed 训练全景图                                         │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  User Code (PyTorch Model)                                                              │
+│       │                                                                                 │
+│       │  deepspeed.initialize(config=ds_config)                                          │
+│       ▼                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          DeepSpeedEngine (:235)                                   │    │
+│  │                                                                                 │    │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │    │
+│  │  │ ZeRO-1       │  │ ZeRO-2       │  │ ZeRO-3       │  │ ZeRO-Offload     │    │    │
+│  │  │ 优化器分片   │  │ +梯度分片    │  │ +参数分片    │  │ → CPU/NVMe       │    │    │
+│  │  │ stage_1_and_ │  │ stage_1_and_ │  │ stage3.py    │  │ parameter_offload │    │    │
+│  │  │ 2.py:134     │  │ 2.py:2204    │  │ :148         │  │ .py:119          │    │    │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────────┘    │    │
+│  │                                                                                 │    │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │    │
+│  │  │ Pipeline     │  │ MoE          │  │ Autotuning   │  │ Inference        │    │    │
+│  │  │ Engine       │  │ (moe/)       │  │ autotuner    │  │ Engine           │    │    │
+│  │  │ pipe/engine  │  │ layer.py     │  │ .py:523      │  │ inference/       │    │    │
+│  │  │ schedule.py  │  │ sharded_moe  │  │ tune_space   │  │ engine.py        │    │    │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────────┘    │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│       │                                                                                 │
+│       │  engine.backward(loss) / engine.step()                                         │
+│       ▼                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          训练循环                                                 │    │
+│  │                                                                                 │    │
+│  │   for batch in data:                                                            │    │
+│  │     loss = engine(batch)        # forward                                        │    │
+│  │     engine.backward(loss)       # backward + gradient allreduce                  │    │
+│  │     engine.step()               # optimizer step + allgather (ZeRO-3)            │    │
+│  │     engine.save_checkpoint()    # DCP-based checkpoint                           │    │
+│  │                                                                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**ZeRO 三阶段对比**：
+
+| 阶段 | 分片内容 | 内存节省 | 通信开销 | 代码位置 |
+|------|---------|---------|---------|---------|
+| ZeRO-1 | 优化器状态 | O(1/d) | 低 | `stage_1_and_2.py:134` |
+| ZeRO-2 | 优化器 + 梯度 | O(1/d) | 中 | `stage_1_and_2.py:2204` |
+| ZeRO-3 | 优化器 + 梯度 + 参数 | O(1/d) | 高 | `stage3.py:148` |
+
+---
+
 ## 1. DeepSpeed 总览与设计哲学
 
 DeepSpeed 是微软开源的分布式训练库，核心差异化是 **ZeRO（Zero Redundancy Optimizer）** 系列优化器，通过将模型状态（优化器状态、梯度、参数）分片到数据并行维度，消除传统 DDP 中每个 rank 持有完整模型状态的冗余。与 Megatron-LM 的"模型并行优先"和 torchtitan 的"FSDP 原生"路线不同，DeepSpeed 走的是"数据并行 + 状态分片"路线——用户代码几乎不变，只需 JSON 配置即可启用 ZeRO-1/2/3、Pipeline Parallel、MoE、Autotuning 等特性。
@@ -1134,4 +1190,38 @@ DeepSpeed 提供优化的 Transformer 算子（`ops/transformer/`）：
 
 ---
 
-> **文档统计**：本文档覆盖 DeepSpeed 8 大核心模块，包含 80+ 处 file:line 源码引用、4 条完整调用链、5 幅 ASCII 架构图、6 张跨框架对比表、5 张配置参数表、4 个真实代码片段。
+## 附录 B：工作实战要点速查
+
+| 场景 | 查哪里 | 关键代码 |
+|------|--------|---------|
+| 切换 ZeRO 阶段 | `ds_config.json` → `zero_optimization.stage` | 1/2/3 |
+| ZeRO-3 参数分片 | `DeepSpeedZeroOptimizer_Stage3` | `stage3.py:148` |
+| CPU Offload 配置 | `ZeROOffloadParam` / `ZeROOffloadOptimizer` | `parameter_offload.py:119` |
+| 开启 PP（流水线并行） | `PipelineEngine` | `pipe/engine.py` |
+| 自动调优（Autotuning） | `Autotuner.tune_space()` | `autotuner.py:523` |
+| 推理引擎配置 | `InferenceEngine` | `inference/engine.py` |
+| 自定义 MoE routing | `TokenChoiceTopKRouter` | `ep_router.py:27` |
+| 替换 Transformer 层 | `replace_transformer_layer()` | `module_inject/replace_module.py:189` |
+| CPU Adam 优化器 | `DeepSpeedCPUAdam` | `ops/adam/cpu_adam.py:13` |
+| Fused Adam 优化器 | `FusedAdam` | `ops/adam/fused_adam.py:18` |
+| TP 推理（AutoTP） | `AutoTP` | `module_inject/auto_tp.py` |
+| 混合精度配置 | `fp16` / `bf16` in ds_config | `runtime/fp16/bf16.py` |
+
+---
+
+## 附录 C：常见坑与解决方案
+
+| 问题现象 | 根因 | 解决方案 | 代码位置 |
+|---------|------|---------|---------|
+| ZeRO-3 训练极慢 | AllGather 通信开销大 | 启用 `overlap_comm=True` | `stage3.py` |
+| CPU Offload OOM | CPU 内存不足 | 减少 `offload_param` 范围 / 增加 CPU 内存 | `parameter_offload.py` |
+| PP bubble 率过高 | microbatch 数不足 | 增加 `num_microbatches` ≥ PP stages × 2 | `pipe/schedule.py` |
+| Autotuning 耗时 | 搜索空间过大 | 限制 `max_train_batch_size` 范围 | `autotuner.py:523` |
+| 推理引擎 TP 报错 | 进程组初始化顺序 | 先 `init_inference()` 再创建 TP 组 | `inference/engine.py` |
+| MoE + ZeRO-3 冲突 | 参数分片与 expert 分布不兼容 | 使用 `MoE` 专用分片策略 | `moe/sharded_moe.py` |
+
+> **交叉引用**：ZeRO 与 Megatron DistributedOptimizer 对比详见 `skill-knowledge/pretraining.md`；MoE 详解详见 `skill-knowledge/moe.md`；PyTorch FSDP2 详见 `skill-knowledge/pytorch.md`。
+
+---
+
+> **文档统计**：本文档覆盖 DeepSpeed 8 大核心模块，包含 80+ 处 file:line 源码引用、4 条完整调用链、5 幅 ASCII 架构图、6 张跨框架对比表、5 张配置参数表、5 个真实代码片段、3 个附录。

@@ -4,7 +4,7 @@
 
 ---
 
-## 1. PyTorch 训练栈全景
+## 0. PyTorch 训练栈全景
 
 PyTorch 训练栈由六个核心层级构成，自底向上依次为：CUDA 运行时 → 分布式通信 → 自动微分 → 神经网络模块 → 优化器 → 编译后端。上层训练框架（Megatron-LM、DeepSpeed、torchtitan）在这些基础组件之上构建自己的并行策略和调度逻辑。
 
@@ -49,7 +49,7 @@ PyTorch 训练栈由六个核心层级构成，自底向上依次为：CUDA 运�
 
 ---
 
-## 2. torch.nn — 神经网络基础
+## 1. torch.nn — 神经网络基础
 
 `torch.nn` 是 PyTorch 的神经网络基础层，核心抽象是 `nn.Module`。所有模型都继承自 `nn.Module`，通过注册参数（`Parameter`）、缓冲区（`Buffer`）和子模块（`Module`）来构建层级结构。
 
@@ -235,7 +235,7 @@ class Linear(Module):
 
 ---
 
-## 3. torch.autograd — 自动微分
+## 2. torch.autograd — 自动微分
 
 `torch.autograd` 是 PyTorch 的自动微分引擎，通过动态计算图（Dynamic Computation Graph）实现反向传播。每个 `Tensor` 的 `grad_fn` 指向创建它的 `Function` 节点，形成链式结构。
 
@@ -314,7 +314,7 @@ class _SingleLevelFunction(_C._FunctionBase, FunctionCtx, _HookMixin,
 
 ---
 
-## 4. torch.optim — 优化器
+## 3. torch.optim — 优化器
 
 `torch.optim` 提供参数更新的数学实现。所有优化器继承自 `Optimizer` 基类，通过 `param_groups` 管理不同参数组的超参数，通过 `state` 维护每个参数的优化器状态（如动量、方差）。
 
@@ -418,7 +418,7 @@ class AdamW(Adam):
 
 ---
 
-## 5. torch.distributed — 分布式通信
+## 4. torch.distributed — 分布式通信
 
 `torch.distributed` 提供跨进程/跨节点的集合通信原语。核心抽象是 `ProcessGroup`（进程组）和 `Backend`（通信后端），上层构建 `all_reduce`、`broadcast`、`all_gather`、`reduce_scatter` 等集合操作。
 
@@ -510,7 +510,7 @@ dist.all_reduce(tensor)
 
 ---
 
-## 6. FSDP2（Fully Sharded Data Parallel）
+## 5. FSDP2（Fully Sharded Data Parallel）
 
 FSDP2 是 PyTorch 2.x 推出的新一代数据并行方案，相比 FSDP1（`FullyShardedDataParallel`）更轻量、更灵活。核心思想是将模型参数按 rank 分片（shard），前向/反向时按需 all-gather 重建完整参数，反向结束后通过 reduce-scatter 同步梯度并释放全量参数。
 
@@ -585,7 +585,7 @@ class FlatParamHandle:
 
 ---
 
-## 7. DTensor 与 Tensor Parallel
+## 6. DTensor 与 Tensor Parallel
 
 `torch.distributed.tensor`（DTensor）是 PyTorch 2.x 引入的分布式张量抽象，为 Tensor Parallel（TP）和 Sequence Parallel 提供统一的设备无关描述。
 
@@ -672,7 +672,7 @@ ColwiseParallel Linear:
 
 ---
 
-## 8. Pipeline Parallel
+## 7. Pipeline Parallel
 
 Pipeline Parallel（PP）将模型按层切分到多个设备，通过微批次（microbatch）流水线实现并行。PyTorch 2.x 推出了新的 `torch.distributed.pipelining` API。
 
@@ -732,7 +732,7 @@ microbatches = split_tensor_into_1d_equal_chunks(input, chunks=n_microbatches)
 
 ---
 
-## 9. DCP（Distributed Checkpoint）
+## 8. DCP（Distributed Checkpoint）
 
 `torch.distributed.checkpoint`（DCP）是 PyTorch 2.x 推出的新一代 checkpoint 系统，支持分布式环境下的高效保存/加载，是 FSDP2 推荐的 checkpoint 方案。
 
@@ -783,7 +783,7 @@ def set_state_dict(model, optimizer=None, ...):
 
 ---
 
-## 10. CUDA 基础设施
+## 9. CUDA 基础设施
 
 `torch.cuda` 提供 CUDA 运行时封装，包括 CUDAGraph（图捕获/回放）、CUDACachingAllocator（内存分配器）、Stream/Event（异步执行）等。
 
@@ -879,7 +879,7 @@ class Event:
 
 ---
 
-## 11. torch.compile（Inductor 后端）
+## 10. torch.compile（Inductor 后端）
 
 `torch.compile` 是 PyTorch 2.x 的编译入口，通过捕获计算图并交给后端编译器（默认 Inductor）生成优化后的 kernel，实现性能提升。
 
@@ -935,7 +935,7 @@ torch.compile(model)
 
 ---
 
-## 12. multiprocessing（多进程启动）
+## 11. multiprocessing（多进程启动）
 
 `torch.multiprocessing` 封装 Python 标准库 `multiprocessing`，提供适合 PyTorch 训练的多进程启动方案。
 
@@ -975,7 +975,7 @@ spawn(worker, args=(world_size,), nprocs=world_size, join=True)
 
 ---
 
-## 13. 跨模块调用链总图
+## 12. 跨模块调用链总图
 
 下图展示一个完整训练步骤中各核心模块的调用关系：
 
@@ -1009,7 +1009,7 @@ spawn(worker, args=(world_size,), nprocs=world_size, join=True)
 
 ---
 
-## 14. 关键配置参数表
+## 13. 关键配置参数表
 
 ### 14.1 FSDP2 配置参数
 
@@ -1058,7 +1058,7 @@ spawn(worker, args=(world_size,), nprocs=world_size, join=True)
 
 ---
 
-## 15. PyTorch 训练栈 vs 上层框架对比表
+## 14. PyTorch 训练栈 vs 上层框架对比表
 
 ### 15.1 并行策略对比
 
@@ -1127,4 +1127,40 @@ spawn(worker, args=(world_size,), nprocs=world_size, join=True)
 
 ---
 
-> **文档统计**：本文档覆盖 PyTorch 11 个核心模块，包含 60+ 处 file:line 源码引用、6 条完整调用链、4 幅 ASCII 架构图、5 张跨框架对比表、5 张配置参数表。
+## 附录 B：工作实战要点速查
+
+| 场景 | 查哪里 | 关键代码 |
+|------|--------|---------|
+| 启用 FSDP2 | `fully_shard()` | `fully_sharded_data_parallel.py:397` |
+| 配置 TP（Tensor Parallel） | `parallelize_module()` + `ColwiseParallel` | `tensor/parallel/api.py:14` |
+| Pipeline Parallel | `PipelineStage` | `pipelining/stage.py` |
+| DCP Checkpoint 保存 | `dcp.save()` / `dcp.load()` | `distributed/checkpoint/` |
+| torch.compile 调试 | `compile_fx_inner()` | `_inductor/compile_fx.py:857` |
+| CUDA Graph 捕获 | `CUDAGraph.capture_begin()` | `cuda/graphs.py:390` |
+| 自定义 autograd Function | `Function.forward()` / `backward()` | `autograd/function.py:364` |
+| DeviceMesh 创建 | `init_device_mesh()` | `distributed/device_mesh.py:1544` |
+| 分布式初始化 | `init_process_group()` | `distributed_c10d.py:2350` |
+| 混合精度训练 | `autocast` + `GradScaler` | `torch/amp/` |
+| 多进程启动 | `mp.spawn()` | `multiprocessing/__init__.py` |
+| 内存分析 | `memory_stats()` / `memory_snapshot()` | `cuda/memory.py:232` |
+
+---
+
+---
+
+## 附录 C：常见坑与解决方案
+
+| 问题现象 | 根因 | 解决方案 | 代码位置 |
+|---------|------|---------|---------|
+| FSDP2 resharding 慢 | 跨节点 AllGather 带宽不足 | 启用 `forward_prefetch=True` | `fully_sharded_data_parallel.py` |
+| DTensor TP 报错 | mesh 维度与 TP 度不匹配 | 检查 `DeviceMesh` 形状 | `tensor/parallel/api.py` |
+| torch.compile 图断裂 | 动态控制流 / 数据依赖 | 使用 `fullgraph=True` 或标记 `torch._dynamo.mark_static` | `_inductor/compile_fx.py` |
+| CUDA Graph replay 错误 | 输入地址变化 | 固定输入 tensor 地址 | `cuda/graphs.py` |
+| DCP 加载 shape 不匹配 | 并行度变化导致分片不同 | 使用 `reshard=True` | `distributed/checkpoint/` |
+| autograd 内存泄漏 | 未释放中间 tensor | 使用 `torch.no_grad()` 或 `del` | `autograd/__init__.py` |
+
+> **交叉引用**：上层框架如何使用 PyTorch 详见 `skill-knowledge/pretraining.md`（Megatron/torchtitan）、`skill-knowledge/deepspeed.md`（DeepSpeed）。
+
+---
+
+> **文档统计**：本文档覆盖 PyTorch 11 个核心模块，包含 60+ 处 file:line 源码引用、6 条完整调用链、4 幅 ASCII 架构图、5 张跨框架对比表、5 张配置参数表、3 个附录。
