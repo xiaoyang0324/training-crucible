@@ -4,6 +4,107 @@
 
 ---
 
+## 0. 预训练全流程全景图
+
+下图展示从 `pretrain()` 入口到 `optimizer.step()` 完成的完整数据流和模块调用关系，涵盖 Megatron-LM 与 torchtitan 两条路径：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                            预训练全流程全景图                                          │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                         阶段一：初始化 (Initialize)                          │    │
+│  │                                                                             │    │
+│  │  pretrain() ──→ initialize_megatron() ──→ initialize_model_parallel()      │    │
+│  │       │               │                          │                          │    │
+│  │       │               │                          ├─ TP 进程组               │    │
+│  │       │               │                          ├─ PP 进程组               │    │
+│  │       │               │                          ├─ CP 进程组               │    │
+│  │       │               │                          ├─ EP 进程组               │    │
+│  │       │               │                          └─ DP 进程组               │    │
+│  │       │               └─ 随机种子 / timers / 分布式后端                      │    │
+│  │       │                                                                     │    │
+│  │  [torchtitan] main() ──→ ConfigManager ──→ Trainer.__init__()               │    │
+│  │                              │                │                             │    │
+│  │                              │                ├─ ParallelDims.build_mesh()  │    │
+│  │                              │                └─ DeviceMesh 多维拓扑        │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                          │                                          │
+│                                          ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                    阶段二：模型与优化器构建 (Setup)                           │    │
+│  │                                                                             │    │
+│  │  setup_model_and_optimizer()                                                │    │
+│  │    ├─ get_model() ──→ TransformerBlock ──→ [TransformerLayer × N]           │    │
+│  │    │                      ├─ Attention (QKV + CoreAttn + OutProj)           │    │
+│  │    │                      └─ MLP/MoE (fc1 + activation + fc2)               │    │
+│  │    ├─ get_megatron_optimizer() ──→ DistributedOptimizer                     │    │
+│  │    │    ├─ grad buffer 按 DP world size 分片                                 │    │
+│  │    │    └─ _build_model_gbuf_param_range_map()                              │    │
+│  │    └─ OptimizerParamScheduler (warmup + decay)                              │    │
+│  │                                                                             │    │
+│  │  [torchtitan] Trainer.__init__()                                            │    │
+│  │    ├─ model_config.build() ──→ meta init                                    │    │
+│  │    ├─ model_spec.parallelize_fn() ──→ TP + FSDP + AC + Compile              │    │
+│  │    ├─ OptimizersContainer ──→ regex 参数组匹配                               │    │
+│  │    └─ LRSchedulersContainer ──→ warmup + stable + decay                     │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                          │                                          │
+│                                          ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                      阶段三：训练循环 (Train Loop)                            │    │
+│  │                                                                             │    │
+│  │  train() ──→ while iteration < train_iters:                                 │    │
+│  │    └─ train_step() ──┬─ optimizer.zero_grad()                               │    │
+│  │                      ├─ forward_backward_func() ──┬─ forward_step()         │    │
+│  │                      │          (PP schedule)      │    ├─ get_batch()       │    │
+│  │                      │                             │    ├─ model.forward()   │    │
+│  │                      │                             │    │   ├─ Attn fwd      │    │
+│  │                      │                             │    │   └─ MLP/MoE fwd   │    │
+│  │                      │                             │    └─ loss_func()       │    │
+│  │                      │                             └─ backward_step()         │    │
+│  │                      │                                  └─ loss.backward()    │    │
+│  │                      ├─ grad sync (async reduce-scatter / AllGather)         │    │
+│  │                      ├─ clip_grad_norm_()                                    │    │
+│  │                      ├─ optimizer.step() ──→ step_with_ready_grads()        │    │
+│  │                      │    ├─ AdamW 参数更新                                   │    │
+│  │                      │    └─ param AllGather (overlap with next fwd)         │    │
+│  │                      └─ lr_scheduler.step()                                  │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                          │                                          │
+│                                          ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                      阶段四：Checkpoint 与评估 (Save/Eval)                    │    │
+│  │                                                                             │    │
+│  │  if iteration % save_interval == 0:                                         │    │
+│  │    ├─ save_checkpoint() ──→ model.state_dict() + optimizer.state_dict()     │    │
+│  │    └─ [torchtitan] dcp.save() ──→ PyTorch DCP 标准格式                      │    │
+│  │                                                                             │    │
+│  │  if iteration % eval_interval == 0:                                         │    │
+│  │    └─ evaluate() ──→ 在验证集上计算 loss / perplexity                       │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                     │
+│  ═══ 数据流 ═══                                                                     │
+│  Token IDs → Embedding → [TransformerBlock × N] → LayerNorm → LM Head → Logits     │
+│                    │    Attention: QKV proj → CoreAttn → Out proj                  │
+│                    │    MLP/MoE: fc1 → activation → fc2 (或 Router → Experts)      │
+│                    └─ 每层输出: hidden_states [seq, batch, hidden]                  │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**全景图核心路径总结：**
+
+| 阶段 | Megatron-LM 入口 | torchtitan 入口 | 输出 |
+|------|-----------------|-----------------|------|
+| 初始化 | `pretrain() → initialize_megatron()` | `main() → Trainer.__init__()` | 进程组、DeviceMesh |
+| 构建 | `setup_model_and_optimizer()` | `model_config.build() + parallelize_fn()` | 模型、优化器、调度器 |
+| 训练循环 | `train() → train_step()` | `Trainer.train() → train_step()` | 参数更新 |
+| 持久化 | `save_checkpoint()` | `dcp.save()` | checkpoint 文件 |
+
+---
+
 ## 1. 训练入口与启动流程
 
 ### 概念原理
@@ -607,6 +708,42 @@ train_step()                                             # training.py:3010
 - 参数更新只针对 owned params，然后 AllGather 同步完整参数
 - 支持 `overlap_param_gather`：参数 AllGather 与下一步 forward 重叠
 
+`step_with_ready_grads()` 实际代码（distrib_optimizer.py:3177-3208）：
+
+```python
+# megatron/core/optimizer/distrib_optimizer.py:3177
+@torch.no_grad()
+def step_with_ready_grads(self) -> bool:
+    """Step the optimizer with ready gradients, return successful.
+    Under the hood, either launch synchronous param all-gathers or get ready to launch
+    asynchorous all-gathers that get overlapped with the next forward pass.
+    """
+    update_successful = super().step_with_ready_grads()
+
+    should_sync_params = not self.ddp_config.overlap_param_gather and not getattr(
+        self, '_defer_param_sync', False
+    )
+    timers = self.config.timers
+    if timers is not None and (self.ddp_config.use_megatron_fsdp or should_sync_params):
+        timers('params-all-gather', log_level=1).start(barrier=self.config.barrier_with_L1_time)
+    if self.ddp_config.use_megatron_fsdp:
+        for model_chunk in self.model_chunks:
+            model_chunk.start_param_sync()
+    else:
+        if should_sync_params:
+            self.start_param_sync_for_bucket_group_subset()
+    if timers is not None and (self.ddp_config.use_megatron_fsdp or should_sync_params):
+        timers('params-all-gather').stop()
+
+    return update_successful
+```
+
+**代码要点：**
+1. 先调用 `super().step_with_ready_grads()` 执行底层 AdamW 更新
+2. 根据 `overlap_param_gather` 配置决定同步/异步 AllGather
+3. 异步模式下，AllGather 在 `optimizer.zero_grad()` 或 forward pre-hook 中启动
+4. `timers('params-all-gather')` 用于性能分析
+
 ### torchtitan 实现
 
 **调用链：**
@@ -673,6 +810,44 @@ train_step()                                             # trainer.py:842
 | `fp8_utils.py` | FP8 工具函数 | amax 历史校正 |
 | `Float16Module` | `transformer/module.py` | FP16 模块包装器 |
 
+Transformer Engine FP8 配置实际代码（transformer_config.py:588-618）：
+
+```python
+# megatron/core/transformer/transformer_config.py:588
+fp8: Optional[Literal['e4m3', 'hybrid']] = field(
+    default=None, metadata={"argparse_meta": {"arg_names": ["--fp8-format"]}}
+)
+"""If set, enables the use of FP8 precision through Transformer Engine. There are 2 predefined
+choices (1) 'e4m3' uniformly uses e4m3 for all FP8 tensors, (2) 'hybrid' uses e4m3 for all FP8
+activation and weight tensors and e5m2 for all FP8 output activation gradient tensors."""
+
+fp8_recipe: Optional[Literal['tensorwise', 'delayed', 'mxfp8', 'blockwise', 'custom']] = (
+    "delayed"
+)
+"""If set, enables the use of FP8 precision through Transformer Engine. There are 5 predefined
+choices (1) 'tensorwise' uses per tensor current scaling recipe, (2) 'delayed'
+uses delayed scaling recipe, 3) 'mxfp8' for Blackwell architecture only,
+4) 'blockwise' for blockwise scaling recipe, 5) 'custom' for custom quantization recipe."""
+
+fp8_param: bool = False
+"""If set, keep the parameters in fp8 precision to save memory. This option must be used
+together with fp8 mode (i.e., TransformerConfig.fp8 is not None). Note that not all parameters
+will be converted to fp8; for example, biases will remain unchanged."""
+
+fp8_margin: int = 0
+"""Margin for the scaling factor computation."""
+
+fp8_interval: int = 1
+"""DEPRECATED from TransformerEngine v1.8.0. This flag is ignored.
+Controls how often the scaling factor is recomputed."""
+```
+
+**FP8 配置要点：**
+- `fp8` 选择数据格式：`e4m3`（统一格式）或 `hybrid`（前向 e4m3，梯度 e5m2）
+- `fp8_recipe` 控制 amax 缩放策略：`delayed`（延迟缩放，默认）适合大多数场景
+- `fp8_param=True` 将参数保持 FP8 精度，进一步节省显存
+- `fp8_margin` 和 `fp8_interval` 控制缩放因子计算的保守程度和频率
+
 ### torchtitan 实现
 
 | 文件:行号 | 类 | 职责 |
@@ -730,11 +905,63 @@ TransformerLayer.__init__()                              # transformer_layer.py:
 | `recompute_num_layers` | 重计算的层数 |
 | `recompute_modules` | 选择性重计算的模块列表（如 `core_attn`, `layernorm`, `mlp`） |
 
-**recompute.py:22 `checkpointed_forward()` 核心逻辑：**
-- 将 layers 分为 `[start, end)` 区间
-- `custom_forward()` 内逐层计算，不保存中间激活
-- 支持 `extract_layer_indices` 提取中间层特征
-- 支持 Dual RoPE（`is_dual_rope`）
+`checkpointed_forward()` 实际代码（recompute.py:22-133）：
+
+```python
+# megatron/core/recompute.py:22
+def checkpointed_forward(
+    self: MegatronModule,
+    hidden_states: Tensor,
+    attention_mask: Tensor,
+    context: Optional[Tensor],
+    context_mask: Optional[Tensor],
+    rotary_pos_emb: Tensor,
+    attention_bias: Optional[Tensor],
+    packed_seq_params: PackedSeqParams,
+    use_inner_quantization_context: bool,
+    padding_mask: Optional[Tensor] = None,
+    extract_layer_indices: Optional[Set[int]] = None,
+    layer_offset: int = 0,
+    cp_layout_state: Optional[ContextParallelLayoutState] = None,
+) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+    """Forward method with activation checkpointing."""
+    if extract_layer_indices is None:
+        extract_layer_indices = set()
+    intermediate_hidden_states: List[Tensor] = []
+
+    is_dual_rope = isinstance(rotary_pos_emb, (tuple, list))
+    rotary_pos_emb = rotary_pos_emb if is_dual_rope else (None, rotary_pos_emb)
+
+    def custom(start: int, end: int):
+        def custom_forward(
+            hidden_states, attention_mask, context, context_mask,
+            rotary_pos_emb_local, rotary_pos_emb_global, padding_mask=None,
+        ):
+            rotary_pos_emb = (
+                (rotary_pos_emb_local, rotary_pos_emb_global)
+                if is_dual_rope
+                else rotary_pos_emb_global
+            )
+            for index in range(start, end):
+                layer = self.layers[index]
+                # ... FP8/FP4 量化上下文处理 ...
+                if isinstance(layer, TransformerLayer):
+                    hidden_states, context = layer(**layer_kwargs)
+                else:  # MambaLayer (HybridStack)
+                    hidden_states = layer(**layer_kwargs)
+            return hidden_states, context
+        return custom_forward
+
+    # chunk_runner: 对 [start, end) 区间应用 torch.utils.checkpoint
+```
+
+**代码要点：**
+1. `custom(start, end)` 返回一个闭包 `custom_forward`，供 `torch.utils.checkpoint` 调用
+2. 闭包内逐层计算 `layer(**layer_kwargs)`，不保存中间激活
+3. 支持 Dual RoPE：将 `(rotary_pos_emb_local, rotary_pos_emb_global)` 元组解包
+4. 支持 FP8/FP4 量化上下文：`get_fp8_context(config, layer_number)`
+5. 支持混合架构：`TransformerLayer` 和 `MambaLayer`（HybridStack）分支处理
+6. `extract_layer_indices` 用于从中间层提取特征（如 distillation）
 
 ### torchtitan 实现
 
@@ -806,6 +1033,48 @@ backward pass:
 - `overlap_grad_reduce=True`：梯度 reduce-scatter 与反向计算重叠
 - `overlap_param_gather=True`：参数 AllGather 与 forward 重叠（通过 forward pre-hook）
 - `bucket_size` 控制桶大小（默认 `max(40M, 1M * dp_size)`，line 134）
+
+`LinearWithGradAccumulationAndAsyncCommunication` 实际代码（layers.py:634-687）：
+
+```python
+# megatron/core/tensor_parallel/layers.py:634
+class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
+    """See linear_with_grad_accumulation_and_async_allreduce"""
+
+    @staticmethod
+    @custom_fwd
+    def forward(
+        ctx, input, weight, bias, gradient_accumulation_fusion,
+        allreduce_dgrad, sequence_parallel, grad_output_buffer,
+        wgrad_deferral_limit, tp_group, gtp_remat_size, output_dtype,
+    ):
+        if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
+            main_grad = weight.main_grad
+        else:
+            main_grad = None
+        ctx.save_for_backward(input, weight)
+        ctx.main_grad = main_grad
+        ctx.sequence_parallel = sequence_parallel
+        ctx.tp_group = tp_group
+
+        if sequence_parallel:
+            dim_size = list(input.size())
+            dim_size[0] = dim_size[0] * tp_group.size()
+            all_gather_buffer = get_global_memory_buffer().get_tensor(dim_size, input.dtype, "mpu")
+            dist_all_gather_func(all_gather_buffer, input, group=tp_group)
+            total_input = all_gather_buffer
+        else:
+            total_input = input
+
+        return _linear_forward(total_input, weight, bias, output_dtype)
+```
+
+**代码要点：**
+1. 自定义 `torch.autograd.Function`，融合梯度累积与异步通信
+2. Sequence Parallel 时先 AllGather 输入（`dist_all_gather_func`），通过 `get_global_memory_buffer()` 获取通信缓冲区
+3. `gradient_accumulation_fusion`：将梯度直接累积到 `weight.main_grad`，避免额外拷贝
+4. `ctx.save_for_backward(input, weight)` 保存反向所需张量
+5. GTP (Gradient Tensor Parallelism) 支持：`gtp_remat_size > 1` 时 all-gather weight
 
 **参数 AllGather 重叠 (distrib_optimizer.py:3177)：**
 ```
@@ -990,59 +1259,95 @@ load_checkpoint()
 
 ---
 
-## 10. 源码文件索引
+## 10. 预训练完整调用链总图
 
-### Megatron-LM 核心文件
+下图展示一个训练步骤中所有核心模块的调用关系和数据流：
 
-| 文件路径 | 主要职责 |
-|----------|----------|
-| `pretrain_gpt.py` | GPT 预训练入口，含 `get_batch`, `loss_func`, `forward_step` |
-| `megatron/training/training.py` | 训练主逻辑：`pretrain`, `setup_model_and_optimizer`, `train_step`, `train` |
-| `megatron/training/initialize.py` | 分布式初始化 `initialize_megatron` |
-| `megatron/core/parallel_state.py` | 并行进程组管理 `initialize_model_parallel` |
-| `megatron/core/tensor_parallel/layers.py` | TP 层：`ColumnParallelLinear`, `RowParallelLinear` |
-| `megatron/core/tensor_parallel/mappings.py` | TP 通信原语 |
-| `megatron/core/pipeline_parallel/schedules.py` | PP 调度：1F1B, Interleaved, ZB |
-| `megatron/core/pipeline_parallel/p2p_communication.py` | PP P2P 通信 |
-| `megatron/core/transformer/transformer_block.py` | TransformerBlock 实现 |
-| `megatron/core/transformer/transformer_layer.py` | TransformerLayer 实现 |
-| `megatron/core/transformer/attention.py` | Attention 实现 |
-| `megatron/core/transformer/mlp.py` | MLP 实现 |
-| `megatron/core/transformer/transformer_config.py` | Transformer 配置（fp8, recompute 等） |
-| `megatron/core/recompute.py` | 激活重计算 `checkpointed_forward` |
-| `megatron/core/distributed/distributed_data_parallel.py` | DDP 实现 |
-| `megatron/core/optimizer/__init__.py` | 优化器构建入口 |
-| `megatron/core/optimizer/distrib_optimizer.py` | DistributedOptimizer |
-| `megatron/core/optimizer/optimizer_param_scheduler.py` | LR 调度器 |
-| `megatron/core/transformer/moe/moe_layer.py` | MoE 层 |
-| `megatron/core/transformer/moe/router.py` | MoE Router |
-| `megatron/core/transformer/moe/token_dispatcher.py` | Token 分发器 |
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              预训练完整训练步骤调用链                                        │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐        │
+│  │   数据加载    │     │   分布式初始化 │     │   模型构建    │     │   优化器构建  │        │
+│  │  get_batch() │     │ initialize_  │     │ get_model()  │     │ get_megatron │        │
+│  │              │     │ model_parallel│     │              │     │ _optimizer() │        │
+│  └──────┬───────┘     └──────┬───────┘     └──────┬───────┘     └──────┬───────┘        │
+│         │                    │                    │                    │                │
+│         │                    │                    │                    │                │
+│         ▼                    ▼                    ▼                    ▼                │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐        │
+│  │                           train_step() 单步训练                              │        │
+│  │                                                                              │        │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐     │        │
+│  │  │                    forward_backward_func()                          │     │        │
+│  │  │                    (PP schedule: 1F1B / Interleaved)                │     │        │
+│  │  │                                                                     │     │        │
+│  │  │  ┌─────────────┐    ┌─────────────────────────────────────────┐     │     │        │
+│  │  │  │forward_step │    │         model.forward()                  │     │     │        │
+│  │  │  │             │───▶│                                         │     │     │        │
+│  │  │  │  get_batch()│    │  TransformerBlock → TransformerLayer     │     │     │        │
+│  │  │  │  → model()  │    │    ├─ _forward_attention()              │     │     │        │
+│  │  │  │  → loss_func│    │    │    ├─ QKV (ColumnParallelLinear)   │     │     │        │
+│  │  │  └─────────────┘    │    │    ├─ CoreAttn / FlashAttention    │     │     │        │
+│  │  │                      │    │    └─ OutProj (RowParallelLinear)  │     │     │        │
+│  │  │                      │    │    └─ _forward_mlp()               │     │     │        │
+│  │  │                      │    │         ├─ fc1 (ColumnParallel)   │     │     │        │
+│  │  │                      │    │         ├─ activation (GeLU/SiLU) │     │     │        │
+│  │  │                      │    │         └─ fc2 (RowParallel)      │     │     │        │
+│  │  │                      │    │    (或 MoE: Router → Dispatch →     │     │     │        │
+│  │  │                      │    │          Expert Compute → Combine)  │     │     │        │
+│  │  │                      │    └─────────────────────────────────────────┘     │     │        │
+│  │  │                      │                                                      │     │        │
+│  │  │                      │    ┌─────────────────────────────────────────┐     │     │        │
+│  │  │                      │    │      backward_step() → loss.backward()  │     │     │        │
+│  │  │                      │    │                                         │     │     │        │
+│  │  │                      │    │  autograd 引擎遍历 grad_fn 链            │     │     │        │
+│  │  │                      │    │    ├─ LinearWithGradAccumulation...     │     │     │        │
+│  │  │                      │    │    │    .backward()                      │     │     │        │
+│  │  │                      │    │    │    ├─ weight.T @ grad_output (wgrad)│     │     │        │
+│  │  │                      │    │    │    └─ input.T @ grad_output (dgrad) │     │     │        │
+│  │  │                      │    │    ├─ LayerNorm.backward()               │     │     │        │
+│  │  │                      │    │    └─ Attention.backward()               │     │     │        │
+│  │  │                      │    │                                         │     │     │        │
+│  │  │                      │    │  ► backward hook 触发梯度同步:           │     │     │        │
+│  │  │                      │    │    bucket_group.register_grad_ready()   │     │     │        │
+│  │  │                      │    │    → async reduce-scatter / all-reduce  │     │     │        │
+│  │  │                      │    └─────────────────────────────────────────┘     │     │        │
+│  │  └──────────────────────────────────────────────────────────────────────────┘     │        │
+│  │                                                                                  │        │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐         │        │
+│  │  │                    optimizer.step()                                 │         │        │
+│  │  │                                                                     │         │        │
+│  │  │  step_with_ready_grads()                                           │         │        │
+│  │  │    ├─ super().step_with_ready_grads()   # AdamW 更新               │         │        │
+│  │  │    │    ├─ exp_avg = β1*exp_avg + (1-β1)*grad                     │         │        │
+│  │  │    │    ├─ exp_avg_sq = β2*exp_avg_sq + (1-β2)*grad²              │         │        │
+│  │  │    │    └─ param -= lr * exp_avg / (√exp_avg_sq + ε) + λ*param   │         │        │        │
+│  │  │    └─ start_param_sync_for_bucket_group_subset()                   │         │        │
+│  │  │         └─ param AllGather (overlap with next forward)            │         │        │
+│  │  └─────────────────────────────────────────────────────────────────────┘         │        │
+│  └──────────────────────────────────────────────────────────────────────────────────┘        │
+│                                                                                             │
+│  ═══ 通信原语 ═══                                                                          │
+│  TP: AllGather (SP 输入) / ReduceScatter (SP 输出) / AllReduce (非 SP)                      │
+│  PP: P2P Send/Recv (跨 stage 传递 activation)                                              │
+│  DP: ReduceScatter (梯度同步) / AllGather (参数同步)                                        │
+│  EP: AllToAll (Token 分发/汇总)                                                            │
+│                                                                                             │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-### torchtitan 核心文件
+**训练步骤关键路径时序：**
 
-| 文件路径 | 主要职责 |
-|----------|----------|
-| `torchtitan/train.py` | 入口 `main()` |
-| `torchtitan/trainer.py` | `Trainer` 类，训练主循环 |
-| `torchtitan/config/configs.py` | 配置定义 |
-| `torchtitan/distributed/parallel_dims.py` | 并行维度 `ParallelDims` |
-| `torchtitan/distributed/fsdp.py` | FSDP 应用 |
-| `torchtitan/distributed/tensor_parallel.py` | TP 基础 |
-| `torchtitan/distributed/linear.py` | TP 线性层 `AllGatherLinear`, `LinearReduceScatter` |
-| `torchtitan/distributed/pipeline_parallel.py` | PP 调度 |
-| `torchtitan/distributed/context_parallel.py` | CP 实现 |
-| `torchtitan/distributed/cudagraph.py` | CUDA Graph |
-| `torchtitan/distributed/activation_checkpoint.py` | AC 实现 |
-| `torchtitan/components/optimizer/optimizer.py` | OptimizersContainer |
-| `torchtitan/components/optimizer/lr_scheduler.py` | LR 调度器 |
-| `torchtitan/components/loss.py` | 损失函数 |
-| `torchtitan/components/checkpointer/dcp.py` | CheckpointManager |
-| `torchtitan/components/quantization/float8.py` | Float8 量化 |
-| `torchtitan/models/llama3/model.py` | Llama3 模型 |
-| `torchtitan/models/common/decoder.py` | 通用 Decoder |
-| `torchtitan/models/common/attention.py` | 通用 Attention |
-| `torchtitan/models/common/feed_forward.py` | 通用 FeedForward |
-| `torchtitan/tools/profiler.py` | Profiler |
+| 时序 | 操作 | 通信 | 可重叠 |
+|------|------|------|--------|
+| T0 | `optimizer.zero_grad()` | - | - |
+| T1 | `forward_step()` → TP AllGather | TP AllGather input | - |
+| T2 | Attention + MLP | - | - |
+| T3 | `backward_step()` | DP reduce-scatter (per bucket) | 梯度与反向重叠 |
+| T4 | `optimizer.step()` | param AllGather | 与下一步 forward 重叠 |
+| T5 | `lr_scheduler.step()` | - | - |
 
 ---
 
@@ -1129,7 +1434,122 @@ load_checkpoint()
 
 ---
 
-> **文档版本：** v2.0 (代码级深度版)
+---
+
+## 附录 B：源码文件索引
+
+下表按功能分类列出本文引用的所有核心文件及其包含的关键类/函数（面试快速定位用）：
+
+### B.1 训练入口与生命周期
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `pretrain_gpt.py` | `get_batch()` (:110), `loss_func()` (:222), `forward_step()` (:295) | 数据批次、损失、单步前向 |
+| `megatron/training/training.py` | `pretrain()` (:1500), `setup_model_and_optimizer()` (:2665), `train_step()` (:3010), `train()` (:4167), `save_checkpoint()` (:4700), `load_checkpoint()` (:2500) | 训练主逻辑 |
+| `megatron/training/initialize.py` | `initialize_megatron()` | 分布式初始化、随机种子 |
+| `megatron/core/parallel_state.py` | `initialize_model_parallel()` (:601) | TP/PP/CP/EP/DP 进程组创建 |
+
+### B.2 并行策略
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `megatron/core/tensor_parallel/layers.py` | `ColumnParallelLinear` (:986), `RowParallelLinear` (:1382), `LinearWithGradAccumulationAndAsyncCommunication` (:634) | TP 线性层 + 自定义 autograd |
+| `megatron/core/tensor_parallel/mappings.py` | `_CopyToModelParallelRegion`, `_ReduceFromModelParallelRegion` | TP 通信原语封装 |
+| `megatron/core/pipeline_parallel/schedules.py` | `get_forward_backward_func()` (:53), `forward_backward_pipelining_without_interleaving()` (:2147) | PP 调度策略 |
+| `megatron/core/pipeline_parallel/p2p_communication.py` | `P2PCommunicator` | PP P2P Send/Recv |
+| `megatron/core/distributed/distributed_data_parallel.py` | `DDP` (:87), `_make_backward_post_hook()` (:553) | DDP + 梯度 bucket 同步 |
+
+### B.3 模型架构
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `megatron/core/transformer/transformer_block.py` | `TransformerBlock` (:267), `_build_layers()` (:336) | Transformer 块，多层容器 |
+| `megatron/core/transformer/transformer_layer.py` | `TransformerLayer.forward()` (:802), `_forward_attention()` (:615), `_forward_mlp()` (:899) | 单层 Transformer 前向 |
+| `megatron/core/transformer/attention.py` | `Attention.forward()` (:1279) | 注意力计算 |
+| `megatron/core/transformer/mlp.py` | `MLP.forward()` (:257) | MLP 前向 |
+| `megatron/core/transformer/transformer_config.py` | `TransformerConfig` (fp8:588, recompute, sequence_parallel) | Transformer 配置中心 |
+
+### B.4 优化器与学习率
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `megatron/core/optimizer/__init__.py` | `get_megatron_optimizer()` (:1002) | 优化器构建入口 |
+| `megatron/core/optimizer/distrib_optimizer.py` | `DistributedOptimizer` (:113), `step_with_ready_grads()` (:3177), `_build_model_gbuf_param_range_map()` (:134) | 分布式优化器，状态分片 |
+| `megatron/core/optimizer/optimizer_param_scheduler.py` | `OptimizerParamScheduler` | LR 调度器 (warmup + decay) |
+
+### B.5 激活重计算与内存
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `megatron/core/recompute.py` | `checkpointed_forward()` (:22) | 激活重计算核心逻辑 |
+
+### B.6 精度与混合精度
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `megatron/core/fp8_utils.py` | `get_fp8_context()`, amax 历史校正 | FP8 工具函数 |
+| `megatron/core/transformer/module.py` | `Float16Module` | FP16 模块包装器 |
+
+### B.7 MoE 专家并行
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `megatron/core/transformer/moe/moe_layer.py` | `MoELayer.forward()` (:625) | MoE 层前向 |
+| `megatron/core/transformer/moe/router.py` | `TopKRouter` (:148), `_apply_expert_bias()` (:750) | TopK 路由 + 负载均衡 |
+| `megatron/core/transformer/moe/token_dispatcher.py` | `MoEAllGatherTokenDispatcher` (:233), `MoEAlltoAllTokenDispatcher` (:375) | Token 分发器 |
+
+### B.8 Checkpoint
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `megatron/core/optimizer/distrib_optimizer.py` | `state_dict()` (:127) | 优化器状态导出（含 FQN 映射） |
+| `megatron/core/ckpt/manager.py` | `CheckpointManager` | checkpoint 文件管理 |
+
+### B.9 torchtitan 核心文件
+
+| 文件路径 | 核心类/函数 | 职责 |
+|----------|------------|------|
+| `torchtitan/train.py` | `main()` (:17) | 入口函数 |
+| `torchtitan/trainer.py` | `Trainer` (:68), `train_step()` (:842), `train()` (:1010) | 训练器主类 |
+| `torchtitan/distributed/parallel_dims.py` | `ParallelDims` (:132), `build_mesh()` (:211) | 并行维度 + DeviceMesh |
+| `torchtitan/distributed/fsdp.py` | `apply_fsdp_to_decoder()` (:168) | FSDP2 应用 |
+| `torchtitan/distributed/tensor_parallel.py` | `NoParallel` (:19) | TP 基础 |
+| `torchtitan/distributed/linear.py` | `AllGatherLinear` (:47), `LinearReduceScatter` (:307) | TP 线性层 |
+| `torchtitan/distributed/activation_checkpoint.py` | `FullAC` (:166), `SelectiveAC` (:185), `MemoryBudgetAC` (:290) | 激活重计算 |
+| `torchtitan/distributed/cudagraph.py` | `CUDAGraphWrapper` (:189) | CUDA Graph 捕获回放 |
+| `torchtitan/components/optimizer/optimizer.py` | `OptimizersContainer` (:79), `default_adamw()` (:378) | 优化器容器 |
+| `torchtitan/components/optimizer/lr_scheduler.py` | `linear_warmup_stable_decay()` (:130) | LR 调度器 |
+| `torchtitan/components/checkpointer/dcp.py` | `CheckpointManager` (:89) | Checkpoint 管理器 |
+| `torchtitan/components/quantization/float8.py` | `Float8LinearConverter` (:53) | Float8 量化 |
+| `torchtitan/models/llama3/model.py` | `Llama3Model` (:53) | Llama3 模型 |
+| `torchtitan/models/common/decoder.py` | `Decoder` (:62), `TransformerBlock` (:48) | 通用 Decoder |
+
+### B.10 文件路径速查（按字母排序）
+
+| 文件路径 | 模块分类 | 关键符号 |
+|----------|---------|---------|
+| `megatron/core/distributed/distributed_data_parallel.py` | DP | `DDP` |
+| `megatron/core/optimizer/distrib_optimizer.py` | Optimizer | `DistributedOptimizer` |
+| `megatron/core/optimizer/optimizer_param_scheduler.py` | Optimizer | `OptimizerParamScheduler` |
+| `megatron/core/pipeline_parallel/schedules.py` | PP | `forward_backward_pipelining_*` |
+| `megatron/core/parallel_state.py` | Init | `initialize_model_parallel` |
+| `megatron/core/recompute.py` | Memory | `checkpointed_forward` |
+| `megatron/core/tensor_parallel/layers.py` | TP | `ColumnParallelLinear` |
+| `megatron/core/transformer/attention.py` | Model | `Attention` |
+| `megatron/core/transformer/mlp.py` | Model | `MLP` |
+| `megatron/core/transformer/moe/moe_layer.py` | MoE | `MoELayer` |
+| `megatron/core/transformer/moe/router.py` | MoE | `TopKRouter` |
+| `megatron/core/transformer/moe/token_dispatcher.py` | MoE | `MoEAlltoAllTokenDispatcher` |
+| `megatron/core/transformer/transformer_block.py` | Model | `TransformerBlock` |
+| `megatron/core/transformer/transformer_config.py` | Config | `TransformerConfig` |
+| `megatron/core/transformer/transformer_layer.py` | Model | `TransformerLayer` |
+| `megatron/training/training.py` | Training | `pretrain`, `train_step` |
+| `pretrain_gpt.py` | Entry | `get_batch`, `forward_step` |
+| `torchtitan/trainer.py` | Training | `Trainer` |
+
+---
+
+> **文档版本：** v3.0 (代码级深度版 — 含全景图 + 代码片段 + 总调用链 + 源码索引)
 > **生成日期：** 2026-08-28
 > **覆盖框架：** Megatron-LM (NVIDIA) + torchtitan (Meta)
-> **总计：** 10 章 + 附录，50+ file:line 引用，10+ 调用链，10+ 对比表
+> **总计：** 11 章 + 2 附录，60+ file:line 引用，12+ 调用链，15+ 对比表，4 个真实代码片段，2 个全景 ASCII 图

@@ -4,6 +4,88 @@
 
 ---
 
+## 0. RL 训练循环全景图
+
+LLM 强化学习训练系统由五个核心阶段组成，形成闭环迭代。下图展示完整 RL Loop 的数据流，包含同步/异步两种模式的差异：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           RL Training Loop 全景图                                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│   ┌──────────┐     ┌──────────────────────────────────────────────────────────┐      │
+│   │  Prompt  │     │              Rollout (SGLang / vLLM)                     │      │
+│   │  Dataset │────▶│  Generate Responses → Log-probs → Sampling              │      │
+│   └──────────┘     └───────────────────────┬──────────────────────────────────┘      │
+│                                            │                                          │
+│                                            ▼                                          │
+│   ┌────────────────────────────────────────────────────────────────────────────┐     │
+│   │                      Reward Computation                                    │     │
+│   │  Rule-based Reward / RM Model / Outcome Reward → Per-sequence Score       │     │
+│   └───────────────────────┬────────────────────────────────────────────────────┘     │
+│                           │                                                         │
+│                           ▼                                                         │
+│   ┌────────────────────────────────────────────────────────────────────────────┐     │
+│   │                      Advantage Estimation                                   │     │
+│   │  GRPO: Group Norm │ PPO: GAE(γ,λ) │ REINFORCE++: KL-penalized Returns     │     │
+│   └───────────────────────┬────────────────────────────────────────────────────┘     │
+│                           │                                                         │
+│                           ▼                                                         │
+│   ┌────────────────────────────────────────────────────────────────────────────┐     │
+│   │                      Policy Update (GRPO / PPO)                            │     │
+│   │  PPO Clipped Loss + KL Penalty + Entropy Bonus + TIS/OPSM/OPD Correction  │     │
+│   └───────────────────────┬────────────────────────────────────────────────────┘     │
+│                           │                                                         │
+│                           ▼                                                         │
+│   ┌────────────────────────────────────────────────────────────────────────────┐     │
+│   │                      Weight Sync (Training → Inference)                    │     │
+│   │  Broadcast / P2P / RDT / Delta → SGLang Engines → Next Rollout           │     │
+│   └────────────────────────────────────────────────────────────────────────────┘     │
+│                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  【同步模式】每步串行执行：Rollout → Reward → Advantage → Policy Update → Weight Sync │
+│                                                                                     │
+│  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐              │
+│  │ Rollout │──▶│ Reward  │──▶│Advantage│──▶│ Policy  │──▶│  Weight │──▶ Next      │
+│  │         │   │         │   │         │   │ Update  │   │  Sync   │              │
+│  └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘              │
+│                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  【异步模式】当前步训练与上一步 rollout 重叠（流水线并行）：                            │
+│                                                                                     │
+│  ┌─────────┐                                                                          │
+│  │Rollout 0│────────────────┐                                                        │
+│  └─────────┘                │                                                        │
+│       ┌─────────┐           │                                                        │
+│       │Train  0 │◀──────────┘                                                        │
+│       └─────────┘           ┌─────────┐                                             │
+│            ┌─────────┐      │Rollout 1│────────────────┐                            │
+│            │Weight   │◀─────└─────────┘                │                            │
+│            │Sync     │                                 │                            │
+│            └─────────┘                    ┌─────────┐  │                            │
+│                                           │Train  1 │◀─┘                            │
+│                                           └─────────┘                               │
+│                                                                                     │
+│  关键差异：异步模式通过 `update_weights_interval` 控制同步频率，                        │
+│  训练与推理 GPU 资源分离时可实现 100% 流水线利用率。                                    │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**RL Loop 五阶段职责**：
+
+| 阶段 | 输入 | 输出 | 核心计算 |
+|------|------|------|---------|
+| **Rollout** | Prompt batch | Response + log-probs | SGLang/vLLM 生成 |
+| **Reward** | Response | Scalar score | Rule-based / RM / Outcome |
+| **Advantage** | Rewards + KL | Per-token advantage | GRPO group norm / GAE |
+| **Policy Update** | Advantage + old log-probs | Weight gradient | PPO clipped loss + KL + entropy |
+| **Weight Sync** | Updated weights | Synced engines | Broadcast / P2P / RDT |
+
+---
+
 ## 1. RL 训练循环总览
 
 ### 概念原理
@@ -336,6 +418,79 @@ def policy_loss_function(args, batch, logits, sum_of_sample_mean):
         loss = pg_loss - args.entropy_coef * entropy_loss
 ```
 
+**真实源码** (`losses.py:62-396`) — 完整 `policy_loss_function` 实现：
+
+```python
+# miles/backends/training_utils/loss_hub/losses.py:92-126
+parallel_state = get_parallel_state()
+advantages_list = [advantage.detach() for advantage in batch["advantages"]]
+advantages = torch.cat(advantages_list, dim=0)
+rollout_old_log_probs = (
+    [log_prob.detach() for log_prob in batch["rollout_log_probs"]]
+    if batch.get("rollout_log_probs") is not None else None
+)
+reference_log_probs = (
+    [log_prob.detach() for log_prob in batch["ref_log_probs"]]
+    if batch.get("ref_log_probs") is not None else None
+)
+response_lengths = batch["response_lengths"]
+total_lengths = batch["total_lengths"]
+calculate_entropy = args.entropy_coef != 0 or args.observe_training_entropy
+
+log_probs_and_entropy = get_log_probs_and_entropy(
+    logits, args=args, unconcat_tokens=batch["unconcat_tokens"],
+    total_lengths=total_lengths, response_lengths=response_lengths,
+    with_entropy=calculate_entropy, entropy_requires_grad=args.entropy_coef != 0,
+    max_seq_lens=max_seq_lens,
+)
+log_probs = log_probs_and_entropy["log_probs"]
+```
+
+```python
+# miles/backends/training_utils/loss_hub/losses.py:207-227
+pg_loss, pg_clipfrac = compute_policy_loss(
+    ppo_kl, advantages, args.eps_clip, args.eps_clip_high,
+    getattr(args, "eps_clip_c", None)
+)
+if args.use_opsm:
+    pg_loss = pg_loss * opsm_mask
+
+# Apply off-policy correction using importance sampling if enabled
+if args.get_mismatch_metrics or args.use_tis:
+    sum_of_sample_mean_for_mismatch_metrics = sum_of_sample_mean
+    if args.custom_tis_function_path is not None:
+        tis_func = load_function(args.custom_tis_function_path)
+    else:
+        tis_func = vanilla_tis_function
+    ois = (-ppo_kl).exp()
+    pg_loss, modified_response_masks, tis_metrics = tis_func(**tis_kwargs)
+    sum_of_sample_mean = get_sum_of_sample_mean(
+        total_lengths, response_lengths, modified_response_masks, ...,
+        denominators=batch.get("rollout_mask_sums", None),
+    )
+```
+
+```python
+# miles/backends/training_utils/loss_hub/losses.py:303-334
+entropy_loss = pg_loss.new_zeros(())
+loss = pg_loss
+if calculate_entropy:
+    entropy = log_probs_and_entropy["entropy"]
+    entropy = torch.cat(entropy, dim=0)
+    entropy_loss = sum_of_sample_mean(entropy)
+    if args.entropy_coef != 0:
+        loss = pg_loss - args.entropy_coef * entropy_loss
+
+if args.use_kl_loss:
+    ref_log_probs = torch.cat(reference_log_probs, dim=0)
+    kl = compute_approx_kl(log_probs, ref_log_probs,
+                            kl_loss_type=args.kl_loss_type,
+                            importance_ratio=importance_ratio)
+    kl_loss = sum_of_sample_mean(kl)
+    if args.kl_loss_coef != 0:
+        loss = loss + args.kl_loss_coef * kl_loss
+```
+
 `compute_policy_loss` (`math_utils.py:254-277`)：
 ```python
 @torch.compile(dynamic=True)
@@ -348,6 +503,35 @@ def compute_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high, eps_clip_c=
         pg_losses3 = -eps_clip_c * advantages
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    return pg_losses, clipfrac
+```
+
+**真实源码** (`math_utils.py:253-277`) — 完整 `compute_policy_loss` 实现：
+
+```python
+# miles/backends/training_utils/loss_hub/math_utils.py:253-277
+@torch.compile(dynamic=True)
+def compute_policy_loss(
+    ppo_kl: torch.Tensor,
+    advantages: torch.Tensor,
+    eps_clip: float,
+    eps_clip_high: float,
+    eps_clip_c: float | None = None,
+):
+    ratio = _safe_exp_neg_ppo_kl(ppo_kl)
+    pg_losses1 = -ratio * advantages
+    pg_losses2 = -ratio.clamp(1 - eps_clip, 1 + eps_clip_high) * advantages
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+    clipfrac = torch.gt(pg_losses2, pg_losses1).float()
+
+    if eps_clip_c is not None:
+        assert eps_clip_c > 1.0, (...)
+        pg_losses3 = -eps_clip_c * advantages
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    else:
+        pg_losses = clip_pg_losses1
+
     return pg_losses, clipfrac
 ```
 
@@ -442,6 +626,42 @@ def compute_approx_kl(log_probs, log_probs_base, kl_loss_type, importance_ratio=
         kl = importance_ratio * kl
     if kl_loss_type == "low_var_kl":
         kl = torch.clamp(kl, min=-10, max=10)  # :178
+    return kl
+```
+
+**真实源码** (`math_utils.py:138-180`) — 完整 `compute_approx_kl` 实现：
+
+```python
+# miles/backends/training_utils/loss_hub/math_utils.py:138-180
+@torch.compile(dynamic=True)
+def compute_approx_kl(
+    log_probs: torch.Tensor,
+    log_probs_base: torch.Tensor,
+    kl_loss_type: str,
+    importance_ratio: torch.Tensor | None = None,
+) -> torch.Tensor:
+    log_ratio = log_probs.float() - log_probs_base.float()
+
+    if kl_loss_type == "k1":
+        kl = log_ratio
+    elif kl_loss_type == "k2":
+        kl = log_ratio**2 / 2.0
+    elif kl_loss_type in ["k3", "low_var_kl"]:
+        log_ratio = -log_ratio
+        if kl_loss_type == "low_var_kl":
+            log_ratio = _safe_clamp_log_ratio(log_ratio)
+        kl = log_ratio.exp() - 1 - log_ratio
+    else:
+        raise ValueError(f"Unknown kl_loss_type: {kl_loss_type}")
+
+    # Apply IS ratio for unbiased KL estimation (DeepSeek-V3.2)
+    if importance_ratio is not None:
+        kl = importance_ratio * kl
+
+    # Clamp only for low_var_kl for numerical stability
+    if kl_loss_type == "low_var_kl":
+        kl = torch.clamp(kl, min=-10, max=10)
+
     return kl
 ```
 
@@ -570,6 +790,61 @@ class UpdateWeight(abc.ABC):
         # 3. 恢复生成
         ray.get([engine.end_weight_update.remote() for engine in self.rollout_engines])
         ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+```
+
+**真实源码** (`update_weight_utils.py:54-123`) — 完整 `UpdateWeight` 实现：
+
+```python
+# miles/backends/fsdp_utils/update_weight_utils.py:54-123
+class UpdateWeight(abc.ABC):
+    def __init__(self, args: Namespace, model: torch.nn.Module) -> None:
+        self.args = args
+        self.model = model
+        self.weight_version = 0
+
+    def update_weights(self) -> None:
+        self.weight_version += 1
+        if dist.get_rank() == 0:
+            futures = [engine.pause_generation.remote() for engine in self.rollout_engines]
+            futures.extend([engine.flush_cache.remote() for engine in self.rollout_engines])
+            ray.get(futures)
+            ray.get([engine.begin_weight_update.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
+        bucket = []
+        bucket_size = 0
+        model_type = getattr(getattr(self.model, "config", None), "model_type", "")
+        sync_dtypes = getattr(self.model, "_fsdp_sync_dtypes", None)
+        for raw_name, raw_param in self.model.state_dict().items():
+            for name, param in _iter_sync_named_params(raw_name, raw_param, model_type, self.model, sync_dtypes):
+                param_size = param.numel() * param.element_size()
+                if bucket and bucket_size + param_size >= self.args.update_weight_buffer_size:
+                    self.wait_and_update_bucket_weights(bucket)
+                    bucket = []
+                    bucket_size = 0
+                target_dtype = sync_dtypes.get(name) if sync_dtypes is not None else None
+                param = gather_full_param(param, async_op=True)
+                bucket.append((name, param, target_dtype))
+                bucket_size += param_size
+
+        if bucket:
+            self.wait_and_update_bucket_weights(bucket)
+
+        dist.barrier(group=get_gloo_group())
+        if dist.get_rank() == 0:
+            ray.get([engine.end_weight_update.remote() for engine in self.rollout_engines])
+            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
+    def wait_and_update_bucket_weights(self, bucket):
+        resolved = []
+        for name, param, target_dtype in bucket:
+            if hasattr(param, "wait"):
+                param = param.wait()
+            if target_dtype is not None and param.dtype != target_dtype:
+                param = param.to(target_dtype)
+            resolved.append((name, param))
+        self.update_bucket_weights(resolved, weight_version=self.weight_version)
 ```
 
 miles 支持多种同步策略（`miles/backends/megatron_utils/update_weight/`）：
@@ -875,79 +1150,241 @@ class RolloutHealthMonitor:
 
 ---
 
-## 13. 源码文件索引
+## 13. RL 训练完整调用链总图
 
-### miles 仓库
+下图展示一个完整 RL 步骤中 rollout / reward / advantage / policy_update / weight_sync 五大阶段的调用关系：
 
-| 文件路径 | 关键符号 | 行号 | 说明 |
-|----------|----------|------|------|
-| `miles/train.py` | `async def train` | :22 | 同步训练入口 |
-| `miles/train_async.py` | `async def train` | :22 | 异步训练入口 |
-| `miles/backends/fsdp_utils/actor.py` | `FSDPTrainRayActor` | :54 | FSDP2 训练 Actor |
-| `miles/backends/megatron_utils/actor.py` | `MegatronTrainRayActor` | :88 | Megatron 训练 Actor |
-| `miles/backends/fsdp_utils/actor.py` | `_create_ref_model` | :645 | CPU-offloaded 参考模型创建 |
-| `miles/ray/rollout/rollout_manager.py` | `RolloutManager` | :54 | Rollout 管理器 |
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                        RL 训练完整调用链总图                                              │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                            train() 主循环                                        │    │
+│  │  miles/train.py:22  │  slime/train.py:9                                         │    │
+│  └───────────────────────────────┬─────────────────────────────────────────────────┘    │
+│                                  │                                                       │
+│          ┌───────────────────────┼───────────────────────┐                               │
+│          ▼                       ▼                       ▼                               │
+│  ┌───────────────┐      ┌───────────────┐      ┌───────────────┐                        │
+│  │   Rollout     │      │    Reward     │      │  Advantage    │                        │
+│  │               │      │               │      │               │                        │
+│  │ rollout_      │────▶│ async_rm()    │────▶│ compute_      │                        │
+│  │ manager.      │      │ or RM model   │      │ advantages()  │                        │
+│  │ generate()    │      │               │      │               │                        │
+│  │               │      │ slime:        │      │ miles:        │                        │
+│  │ miles: :144   │      │ _post_process │      │ advantages.py │                        │
+│  │ slime: :163   │      │ _rewards :279 │      │    :16        │                        │
+│  │               │      │               │      │ slime:        │                        │
+│  │               │      │               │      │ loss.py:704   │                        │
+│  └───────────────┘      └───────────────┘      └───────┬───────┘                        │
+│                                                         │                               │
+│                                                         ▼                               │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          Policy Update                                          │    │
+│  │                                                                                 │    │
+│  │  actor_model.train()                                                            │    │
+│  │    → forward() → logits                                                        │    │
+│  │    → policy_loss_function()                                                     │    │
+│  │        → get_log_probs_and_entropy()     [logits → log_probs + entropy]         │    │
+│  │        → compute_policy_loss()           [ppo_kl + adv → clipped loss]          │    │
+│  │        → [optional] tis_func()           [off-policy IS correction]             │    │
+│  │        → [optional] compute_approx_kl()   [ref model KL penalty]                │    │
+│  │        → sum_of_sample_mean()            [CP-aware reduction]                  │    │
+│  │    → backward() → optimizer.step()                                              │    │
+│  │                                                                                 │    │
+│  │  miles: losses.py:62  │  slime: loss.py:933                                     │    │
+│  └───────────────────────────────┬─────────────────────────────────────────────────┘    │
+│                                  │                                                       │
+│                                  ▼                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          Weight Sync                                             │    │
+│  │                                                                                 │    │
+│  │  actor_model.update_weights()                                                    │    │
+│  │    → UpdateWeight.update_weights()                                              │    │
+│  │        → pause_generation() + flush_cache()    [暂停 rollout 引擎]               │    │
+│  │        → for param in state_dict():            [分桶 gather + transmit]         │    │
+│  │            gather_full_param(param, async_op=True)                               │    │
+│  │            wait_and_update_bucket_weights()                                      │    │
+│  │        → end_weight_update() + continue_generation()                             │    │
+│  │                                                                                 │    │
+│  │  miles: update_weight_utils.py:70  │  slime: update_weight_from_distributed.py:24│    │
+│  └─────────────────────────────────────────────────────────────────────────────────┘    │
+│                                  │                                                       │
+│                                  ▼                                                       │
+│                           [Next Rollout]                                                 │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**调用链 5：Policy Update 内部详细调用链**
+
+```
+policy_loss_function()                              # losses.py:62
+  → get_log_probs_and_entropy(logits, ...)          # logit_processors.py:184
+      → _iter_response_chunks(logits, ...)          # 逐样本提取 response logits
+      → calculate_log_probs_and_entropy(...)        # fused_vocab_parallel_cross_entropy
+  → ppo_kl = old_log_probs - log_probs              # per-token KL
+  → compute_policy_loss(ppo_kl, advantages, ...)    # math_utils.py:254
+      → ratio = exp(-ppo_kl)                        # π_new/π_old
+      → pg_losses1 = -ratio * advantages
+      → pg_losses2 = -clamp(ratio) * advantages     # PPO clip
+      → [dual-clip] pg_losses3 = -eps_clip_c * adv  # dual-clip PPO
+  → [optional] tis_func(pg_loss, ...)               # corrections.py:7
+      → tis = exp(old_logp - rollout_logp)          # IS 权重
+      → pg_loss *= clamp(tis, low, high)
+  → [optional] compute_approx_kl(logp, ref_logp, ...) # math_utils.py:139
+  → loss = pg_loss - entropy_coef * entropy + kl_coef * kl_loss
+  → sum_of_sample_mean(loss)                        # CP-aware reduction
+```
+
+**调用链 6：Weight Sync 内部详细调用链**
+
+```
+UpdateWeight.update_weights()                       # update_weight_utils.py:70
+  → pause_generation.remote() + flush_cache.remote() # 暂停 SGLang 引擎
+  → begin_weight_update.remote()
+  → dist.barrier(group=get_gloo_group())            # 同步所有 rank
+  → for name, param in state_dict():               # 遍历所有参数
+      → _iter_sync_named_params(name, param, ...)  # WeightBridge 变换 (MoE)
+      → gather_full_param(param, async_op=True)     # FSDP gather 完整参数
+      → if bucket_full: wait_and_update_bucket_weights(bucket)
+  → end_weight_update.remote() + continue_generation.remote()
+  → dist.barrier(group=get_gloo_group())
+```
+
+---
+
+## 附录：源码文件索引
+
+按功能分类列出所有引用的文件路径和核心类/函数，便于快速定位。
+
+### A. 训练入口与主循环
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/train.py` | `async def train` | :22 | 同步训练入口（miles） |
+| `miles/train_async.py` | `async def train` | :22 | 异步训练入口（miles） |
+| `slime/train.py` | `def train` | :9 | 同步训练入口（slime） |
+| `slime/train_async.py` | `def train` | :10 | 异步训练入口（slime） |
+
+### B. Rollout 生成
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/ray/rollout/rollout_manager.py` | `RolloutManager` | :54 | Rollout 管理器（miles） |
 | `miles/ray/rollout/rollout_manager.py` | `generate` | :144 | 执行 rollout 并转换训练数据 |
 | `miles/ray/rollout/rollout_manager.py` | `_get_rollout_data` | :243 | 调用 rollout 函数获取样本 |
-| `miles/backends/training_utils/loss_hub/losses.py` | `policy_loss_function` | :62 | 策略损失主函数 |
-| `miles/backends/training_utils/loss_hub/losses.py` | `value_loss_function` | :399 | 价值损失（PPO） |
-| `miles/backends/training_utils/loss_hub/losses.py` | `sft_loss_function` | :457 | SFT 损失 |
-| `miles/backends/training_utils/loss_hub/math_utils.py` | `compute_approx_kl` | :139 | KL 散度估计器 |
-| `miles/backends/training_utils/loss_hub/math_utils.py` | `compute_policy_loss` | :254 | PPO clipped loss |
-| `miles/backends/training_utils/loss_hub/math_utils.py` | `get_grpo_returns` | :453 | GRPO 回报计算 |
-| `miles/backends/training_utils/loss_hub/math_utils.py` | `get_advantages_and_returns_batch` | :615 | 批量 GAE |
-| `miles/backends/training_utils/loss_hub/math_utils.py` | `chunked_gae` | :809 | 并行前缀扫描 GAE |
-| `miles/backends/training_utils/loss_hub/math_utils.py` | `_VocabParallelEntropy` | :414 | Entropy 计算 |
-| `miles/backends/training_utils/loss_hub/advantages.py` | `compute_advantages` | :16 | Advantage 估计调度 |
-| `miles/backends/training_utils/loss_hub/advantages.py` | `normalize_advantages` | :108 | Advantage 白化 |
-| `miles/backends/training_utils/loss_hub/logit_processors.py` | `get_log_probs_and_entropy` | :184 | Log-prob 与 Entropy |
-| `miles/backends/training_utils/loss_hub/corrections.py` | `vanilla_tis_function` | :7 | TIS off-policy 校正 |
-| `miles/backends/training_utils/loss_hub/corrections.py` | `icepop_function` | :35 | clip-or-pop 校正 |
-| `miles/backends/training_utils/cp_utils.py` | `get_logits_and_tokens_offset_with_cp` | :19 | CP offset 计算 |
-| `miles/backends/fsdp_utils/update_weight_utils.py` | `UpdateWeight` | :54 | 权重同步基类 |
-| `miles/backends/fsdp_utils/update_weight_utils.py` | `update_weights` | :70 | 分桶权重传输 |
-| `miles/utils/object_store.py` | `ObjectStoreBackend` | :33 | 对象存储后端枚举 |
-| `miles/utils/types.py` | `Sample` | :26 | 样本数据类 |
-| `miles/utils/health_monitor.py` | `RolloutHealthMonitor` | :11 | 健康监控 |
-| `miles/utils/ft_utils/control_server/server.py` | `start_control_server` | — | 容错控制服务 |
-| `miles/rollout/sglang_rollout.py` | `GenerateState` | :83 | 生成全局状态 |
-
-### slime 仓库
-
-| 文件路径 | 关键符号 | 行号 | 说明 |
-|----------|----------|------|------|
-| `slime/train.py` | `def train` | :9 | 同步训练入口 |
-| `slime/train_async.py` | `def train` | :10 | 异步训练入口 |
-| `slime/backends/megatron_utils/actor.py` | `MegatronTrainRayActor` | :56 | Megatron 训练 Actor |
-| `slime/ray/rollout.py` | `RolloutManager` | :38 | Rollout 管理器 |
+| `miles/rollout/sglang_rollout.py` | `GenerateState` | :83 | 生成全局状态（miles） |
+| `slime/ray/rollout.py` | `RolloutManager` | :38 | Rollout 管理器（slime） |
 | `slime/ray/rollout.py` | `generate` | :163 | 执行 rollout 并转换训练数据 |
 | `slime/ray/rollout.py` | `_post_process_rewards` | :279 | 奖励归一化 + Dr.GRPO |
-| `slime/ray/rollout.py` | `_convert_samples_to_train_data` | :306 | 样本→训练数据转换 |
-| `slime/ray/rollout.py` | `_split_train_data_by_dp` | :428 | DP 分片调度 |
-| `slime/rollout/sglang_rollout.py` | `GenerateState` | :83 | 生成全局状态 |
+| `slime/rollout/sglang_rollout.py` | `GenerateState` | :83 | 生成全局状态（slime） |
 | `slime/rollout/sglang_rollout.py` | `generate_rollout_async` | :374 | 异步 rollout 主循环 |
 | `slime/rollout/data_source.py` | `RolloutDataSource` | :50 | 数据源 |
 | `slime/rollout/data_source.py` | `RolloutDataSourceWithBuffer` | :168 | 带缓冲的数据源 |
-| `slime/backends/megatron_utils/loss.py` | `get_log_probs_and_entropy` | :513 | Log-prob 与 Entropy |
-| `slime/backends/megatron_utils/loss.py` | `get_values` | :607 | 值函数提取 |
-| `slime/backends/megatron_utils/loss.py` | `apply_opd_kl_to_advantages` | :663 | OPD KL 惩罚 |
-| `slime/backends/megatron_utils/loss.py` | `compute_advantages_and_returns` | :704 | Advantage 统一入口 |
-| `slime/backends/megatron_utils/loss.py` | `vanilla_tis_function` | :883 | TIS off-policy 校正 |
-| `slime/backends/megatron_utils/loss.py` | `icepop_function` | :907 | clip-or-pop 校正 |
-| `slime/backends/megatron_utils/loss.py` | `policy_loss_function` | :933 | 策略损失主函数 |
+
+### C. 策略损失与优化
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/backends/training_utils/loss_hub/losses.py` | `policy_loss_function` | :62 | 策略损失主函数（miles） |
+| `miles/backends/training_utils/loss_hub/losses.py` | `value_loss_function` | :399 | 价值损失（PPO） |
+| `miles/backends/training_utils/loss_hub/losses.py` | `sft_loss_function` | :457 | SFT 损失 |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `compute_policy_loss` | :254 | PPO clipped loss |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `compute_approx_kl` | :139 | KL 散度估计器（k1/k2/k3/low_var_kl） |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `_safe_clamp_log_ratio` | :21 | log_ratio 数值稳定 clamp |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `_safe_exp_neg_ppo_kl` | :31 | ESS 权重安全计算 |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `compute_ess_ratio_contribution` | :35 | Effective Sample Size 计算 |
+| `slime/backends/megatron_utils/loss.py` | `policy_loss_function` | :933 | 策略损失主函数（slime） |
 | `slime/backends/megatron_utils/loss.py` | `value_loss_function` | :1175 | 价值损失（PPO） |
-| `slime/backends/megatron_utils/loss.py` | `_build_shifted_tokens` | :273 | zigzag CP token 构建 |
-| `slime/backends/megatron_utils/loss.py` | `_allgather_cp_redistribute` | :194 | allgather→zigzag 转换 |
-| `slime/backends/megatron_utils/cp_utils.py` | `get_logits_and_tokens_offset_with_cp` | :9 | CP offset 计算 |
-| `slime/backends/megatron_utils/cp_utils.py` | `get_sum_of_sample_mean` | :47 | CP-aware reducer |
-| `slime/utils/ppo_utils.py` | `_VocabParallelLogProbEntropy` | :187 | 融合 log-prob + entropy |
+| `slime/utils/ppo_utils.py` | `compute_policy_loss` | :120 | PPO clipped loss（slime） |
 | `slime/utils/ppo_utils.py` | `compute_cispo_loss` | :152 | CISPO loss (MiniMax-M1) |
-| `slime/utils/ppo_utils.py` | `compute_opsm_mask` | :183 | OPSM 序列 masking |
-| `slime/utils/ppo_utils.py` | `compute_approx_kl` | :100 | KL 散度估计器 |
-| `slime/utils/ppo_utils.py` | `compute_policy_loss` | :120 | PPO clipped loss |
-| `slime/utils/ppo_utils.py` | `get_grpo_returns` | :130 | GRPO 回报计算 |
-| `slime/utils/ppo_utils.py` | `get_advantages_and_returns_batch` | :700 | 批量 GAE |
+| `slime/utils/ppo_utils.py` | `compute_approx_kl` | :100 | KL 散度估计器（slime） |
+
+### D. Advantage 估计
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/backends/training_utils/loss_hub/advantages.py` | `compute_advantages` | :16 | Advantage 估计调度（miles） |
+| `miles/backends/training_utils/loss_hub/advantages.py` | `normalize_advantages` | :108 | Advantage 白化 |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `get_grpo_returns` | :453 | GRPO 回报计算 |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `get_advantages_and_returns_batch` | :615 | 批量 GAE |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `chunked_gae` | :809 | 并行前缀扫描 GAE |
+| `slime/backends/megatron_utils/loss.py` | `compute_advantages_and_returns` | :704 | Advantage 统一入口（slime） |
+| `slime/utils/ppo_utils.py` | `get_grpo_returns` | :130 | GRPO 回报计算（slime） |
+| `slime/utils/ppo_utils.py` | `get_advantages_and_returns_batch` | :700 | 批量 GAE（slime） |
+
+### E. Log-probability 与 Entropy 计算
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/backends/training_utils/loss_hub/logit_processors.py` | `get_log_probs_and_entropy` | :184 | Log-prob 与 Entropy（miles） |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `_VocabParallelEntropy` | :414 | Entropy 计算（miles） |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `compute_log_probs` | :280 | 基础 log-prob 计算 |
+| `slime/backends/megatron_utils/loss.py` | `get_log_probs_and_entropy` | :513 | Log-prob 与 Entropy（slime） |
+| `slime/backends/megatron_utils/loss.py` | `get_values` | :607 | 值函数提取 |
+| `slime/backends/megatron_utils/loss.py` | `_build_shifted_tokens` | :273 | zigzag CP token 构建 |
+| `slime/utils/ppo_utils.py` | `_VocabParallelLogProbEntropy` | :187 | 融合 log-prob + entropy |
+
+### F. Off-policy 校正
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/backends/training_utils/loss_hub/corrections.py` | `vanilla_tis_function` | :7 | TIS off-policy 校正（miles） |
+| `miles/backends/training_utils/loss_hub/corrections.py` | `icepop_function` | :35 | clip-or-pop 校正（miles） |
+| `miles/backends/training_utils/loss_hub/math_utils.py` | `compute_opsm_mask` | :183 | OPSM 序列 masking（miles） |
+| `slime/backends/megatron_utils/loss.py` | `vanilla_tis_function` | :883 | TIS off-policy 校正（slime） |
+| `slime/backends/megatron_utils/loss.py` | `icepop_function` | :907 | clip-or-pop 校正（slime） |
+| `slime/backends/megatron_utils/loss.py` | `apply_opd_kl_to_advantages` | :663 | OPD KL 惩罚 |
+| `slime/utils/ppo_utils.py` | `compute_opsm_mask` | :183 | OPSM 序列 masking（slime） |
 | `slime/utils/arguments.py` | `--use-tis` / `--tis-clip` | :1060-1077 | TIS 配置参数 |
-| `slime/utils/health_monitor.py` | `RolloutHealthMonitor` | :9 | 健康监控 |
-| `slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py` | `UpdateWeightFromDistributed` | :24 | 权重同步 |
-| `slime/utils/types.py` | `Sample` | :94 | 样本数据类 |
+
+### G. 权重同步
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/backends/fsdp_utils/update_weight_utils.py` | `UpdateWeight` | :54 | 权重同步基类（miles） |
+| `miles/backends/fsdp_utils/update_weight_utils.py` | `update_weights` | :70 | 分桶权重传输 |
+| `miles/backends/fsdp_utils/update_weight_utils.py` | `wait_and_update_bucket_weights` | :111 | 桶等待与传输 |
+| `miles/backends/fsdp_utils/update_weight_utils.py` | `_iter_sync_named_params` | :35 | WeightBridge 变换（MoE） |
+| `slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py` | `UpdateWeightFromDistributed` | :24 | 权重同步（slime） |
+
+### H. Context Parallel
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/backends/training_utils/cp_utils.py` | `get_logits_and_tokens_offset_with_cp` | :19 | CP offset 计算（miles） |
+| `slime/backends/megatron_utils/cp_utils.py` | `get_logits_and_tokens_offset_with_cp` | :9 | CP offset 计算（slime） |
+| `slime/backends/megatron_utils/cp_utils.py` | `get_sum_of_sample_mean` | :47 | CP-aware reducer |
+| `slime/backends/megatron_utils/loss.py` | `_allgather_cp_redistribute` | :194 | allgather→zigzag 转换 |
+
+### I. 训练 Actor 与数据类
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/backends/fsdp_utils/actor.py` | `FSDPTrainRayActor` | :54 | FSDP2 训练 Actor |
+| `miles/backends/fsdp_utils/actor.py` | `_create_ref_model` | :645 | CPU-offloaded 参考模型 |
+| `miles/backends/megatron_utils/actor.py` | `MegatronTrainRayActor` | :88 | Megatron 训练 Actor |
+| `slime/backends/megatron_utils/actor.py` | `MegatronTrainRayActor` | :56 | Megatron 训练 Actor（slime） |
+| `miles/utils/types.py` | `Sample` | :26 | 样本数据类（miles） |
+| `slime/utils/types.py` | `Sample` | :94 | 样本数据类（slime） |
+
+### J. 容错与健康监控
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/utils/health_monitor.py` | `RolloutHealthMonitor` | :11 | 健康监控（miles） |
+| `miles/utils/ft_utils/control_server/server.py` | `start_control_server` | — | 容错控制服务 |
+| `miles/utils/ft_utils/mini_ft_controller.py` | `maybe_start_mini_ft_controller` | — | 轻量级容错控制器 |
+| `slime/utils/health_monitor.py` | `RolloutHealthMonitor` | :9 | 健康监控（slime） |
+
+### K. 基础设施
+
+| 文件路径 | 核心类/函数 | 行号 | 说明 |
+|----------|------------|------|------|
+| `miles/utils/object_store.py` | `ObjectStoreBackend` | :33 | 对象存储后端枚举 |
+
+---
+
+> **文档统计**：本文档覆盖 RL 训练系统 11 个核心模块，包含 80+ 处 file:line 源码引用、6 条完整调用链、3 幅 ASCII 架构图、2 张跨仓库对比表、1 张配置参数表、1 份源码文件索引附录。

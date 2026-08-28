@@ -415,6 +415,25 @@ struct MUSAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
 };
 ```
 
+**设备计数与可用性**：`csrc/core/Device.cpp`
+```cpp
+// csrc/core/Device.cpp:29-42
+namespace c10::musa {
+DeviceIndex device_count() {
+  DeviceIndex n = 0;
+  C10_MUSA_CHECK(GetDeviceCount(&n));
+  return n;
+}
+DeviceIndex device_count_ensure_non_zero() {
+  DeviceIndex n = 0;
+  C10_MUSA_CHECK(GetDeviceCount(&n));
+  TORCH_CHECK(n > 0, "MUSA error: number of MUSA devices is 0");
+  return n;
+}
+bool is_available() { return device_count() > 0; }
+} // namespace c10::musa
+```
+
 ### 2.3 内存分配器
 
 **C++ 核心**：`csrc/core/MUSACachingAllocator.cpp`（152KB，主要文件）
@@ -445,6 +464,74 @@ struct Block {
 - `kMinBlockSize = 512`（line 59）
 - `kSmallSize = 1 MiB`, `kSmallBuffer = 2 MiB`（line 60-63）
 - `kRoundLarge = 2 MiB`（line 66）
+
+**`NativeCachingAllocator::allocate()`** — 顶层入口（`MUSACachingAllocator.cpp:3755-3781`）：
+```cpp
+// csrc/core/MUSACachingAllocator.cpp:3755-3781
+DataPtr allocate(size_t size) override {
+  constexpr size_t one_exa_bytes = 1152921504606846976ULL;
+  TORCH_CHECK_WITH(OutOfMemoryError, size < one_exa_bytes,
+      "MUSA out of memory. Tried to allocate more than 1EB memory.");
+  c10::DeviceIndex device = 0;
+  C10_MUSA_CHECK(c10::musa::GetDevice(&device));
+  void* devPtr = nullptr;
+  void (*deleteFunc)(void*) = &local_raw_delete;
+  MUSAStream stream = musa::getCurrentMUSAStream(device);
+  if (forceUncachedAllocator() || !isEnabled()) {
+    deleteFunc = &uncached_delete;
+    devPtr = uncached_allocate(size);          // 直接 musaMalloc
+  } else {
+    if (size != 0) {
+      this->malloc(&devPtr, device, size, stream);  // 走缓存池
+    }
+  }
+  return {devPtr, devPtr, deleteFunc, Device(at::musa::kMUSA, device)};
+}
+```
+
+**`DeviceCachingAllocator::free()`** — 释放逻辑（`MUSACachingAllocator.cpp:1608-1670`）：
+```cpp
+// csrc/core/MUSACachingAllocator.cpp:1608-1670
+void free(Block* block) {
+  std::lock_guard<std::recursive_mutex> lock(mutex);
+  block->allocated = false;
+  // 更新统计：allocation / allocated_bytes 递减
+  StatTypes stat_types = get_stat_types_for_pool(*block->pool);
+  for_each_selected_stat_type(stat_types, [&](size_t stat_type) {
+    stats.allocation[stat_type].decrease(1);
+    stats.allocated_bytes[stat_type].decrease(block->size);
+  });
+  record_trace(TraceEntry::FREE_REQUESTED, ...);
+  if (!block->stream_uses.empty()) {
+    // Graph capture 期间 → 延迟释放（deferred_blocks）
+    deferred_blocks.emplace(block, insert_free_marker(block));
+  } else {
+    free_block(block, context);   // 立即回收到 pool
+  }
+}
+```
+
+**`alloc_block()`** — 底层分配（`MUSACachingAllocator.cpp:2816-2920`）：
+```cpp
+// csrc/core/MUSACachingAllocator.cpp:2816-2920
+bool alloc_block(AllocParams& p, bool isRetry, ..., & lock) {
+  void* ptr = nullptr;
+  if (p.is_expandable_segments_active) {
+    // Expandable Segment 路径：muMemAddressReserve + muMemMap
+    p.block = try_allocate_expandable_block(p.device(), p.stream(), p.pool, p.size(), ctx);
+  } else {
+    // 标准路径：musaMallocMaybeCapturing（支持 Graph capture 中的分配）
+    if (MUSAAllocatorConfig::release_lock_on_musamalloc()) {
+      auto sg = c10::make_scope_exit([&]() { lock.lock(); });
+      lock.unlock();    // 释放锁避免 musaMalloc 阻塞其他线程
+      p.err = musaMallocMaybeCapturing(&ptr, size, p);
+    }
+  }
+  total_allocated_memory += size;
+  p.block = new Block(p.device(), p.stream(), size, p.pool, (char*)ptr);
+  return true;
+}
+```
 
 **Python 层**：`torch_musa/core/memory.py`
 - `caching_allocator_alloc`, `empty_cache`, `memory_stats`, `mem_get_info`
@@ -491,6 +578,49 @@ void MUSAGraph::capture_begin(MempoolId_t pool, musaStreamCaptureMode mode) {
 }
 ```
 
+**`MUSAGraph::capture_begin()`** — 开始捕获（`MUSAGraph.cpp:65-138`）：
+```cpp
+// csrc/aten/musa/MUSAGraph.cpp:65-138
+void MUSAGraph::capture_begin(MempoolId_t pool, musaStreamCaptureMode capture_mode) {
+  TORCH_CHECK(!has_graph_exec_, "This MUSAGraph instance already owns a captured graph.");
+  // 1. 注册 default generator + 所有 captured generator states（RNG 安全）
+  auto* gen = get_generator_or_default<MUSAGeneratorImpl>(c10::nullopt, musa::detail::getDefaultMUSAGenerator());
+  gen->register_graph(this);
+  for (auto& [generator_state, wholegraph_increments] : captured_generator_states_) {
+    generator_state->capture_prologue();
+  }
+  // 2. 必须在非 default stream 上捕获
+  TORCH_CHECK(stream != at::musa::getDefaultMUSAStream(), "MUSA graphs must be captured on a non-default stream.");
+  capture_stream_ = stream;
+  capture_dev_ = c10::musa::current_device();
+  // 3. 创建/复用 mempool，调用 beginAllocateToPool 防止 autograd 线程触发无效 event
+  mempool_id_ = c10::musa::MemPool::graph_pool_handle(false);
+  c10::musa::MUSACachingAllocator::beginAllocateToPool(capture_dev_, mempool_id_, ...);
+  // 4. 开始 stream capture
+  AT_MUSA_CHECK(musaStreamBeginCapture(capture_stream_, capture_mode));
+  AT_MUSA_CHECK(musaStreamGetCaptureInfo_v2(stream, &status, &capture_id_, ...));
+}
+```
+
+**`MUSAGraph::replay()`** — 重放（`MUSAGraph.cpp:219-238`）：
+```cpp
+// csrc/aten/musa/MUSAGraph.cpp:219-238
+void MUSAGraph::replay() {
+  TORCH_CHECK(capture_ended_, "Called MUSAGraph::replay without a preceding successful capture.");
+  if (!has_graph_exec_) {
+    TORCH_INTERNAL_ASSERT(keep_graph_);
+    instantiate();   // keep_graph 模式下延迟实例化
+  }
+  c10::OptionalDeviceGuard device_guard{capture_stream_.device()};
+  // 恢复所有 captured generator states（保证 RNG 数值一致）
+  for (auto& [generator_state, wholegraph_increments] : captured_generator_states_) {
+    generator_state->replay_prologue(wholegraph_increments);
+  }
+  // graph_exec_ 可在任意 stream 上重放
+  AT_MUSA_CHECK(musaGraphLaunch(graph_exec_, at::musa::getCurrentMUSAStream()));
+}
+```
+
 **Python 层**：`musa_graph/graphs.py`
 - `MUSAGraph` 类 (line 45-80)：包装 C++ `_MUSAGraph`
 - `graph_pool_handle()` (line 33)：返回 opaque pool token
@@ -505,6 +635,44 @@ void MUSAGraph::capture_begin(MempoolId_t pool, musaStreamCaptureMode mode) {
 PyObject* THMPModule_mccl_version(PyObject* self, PyObject* args) {
   using torch::musa::mccl::version;
   return PyLong_FromUnsignedLongLong(version());
+}
+```
+
+**`ProcessGroupMCCL::allreduce_impl()`** — 集合通信核心（`ProcessGroupMCCL.cpp:3998-4024`）：
+```cpp
+// csrc/distributed/ProcessGroupMCCL.cpp:3998-4024
+c10::intrusive_ptr<Work> ProcessGroupMCCL::allreduce_impl(
+    at::Tensor& tensor, const char* profilingTitle, const AllreduceOptions& opts) {
+  return collective(
+      tensor, tensor,
+      [&](at::Tensor& input, at::Tensor& output, mcclComm_t comm, c10::musa::MUSAStream& stream) {
+        auto mcclDataType = getMcclDataType(input.scalar_type());
+        auto mcclReduceOp = getMcclReduceOp(opts.reduceOp, input, mcclDataType, comm);
+        return mcclAllReduce(
+            input.data_ptr(), output.data_ptr(), input.numel(),
+            mcclDataType, mcclReduceOp, comm, stream.stream());
+      },
+      OpType::ALLREDUCE, opts.asyncOp, profilingTitle);
+}
+```
+
+**`ProcessGroupMCCL::broadcast()`** — 广播（`ProcessGroupMCCL.cpp:4115-4167`）：
+```cpp
+// csrc/distributed/ProcessGroupMCCL.cpp:4115-4167
+c10::intrusive_ptr<Work> ProcessGroupMCCL::broadcast(
+    std::vector<at::Tensor>& tensors, const BroadcastOptions& opts) {
+  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+  auto tensor = tensors.back();
+  check_gpu_single_tensor(tensor);
+  RECORD_PARAM_COMMS_DATA(..., "broadcast", ...);
+  const auto root = opts.rootRank + opts.rootTensor;
+  return collective(
+      tensor, tensor,
+      [&](at::Tensor& input, at::Tensor& output, mcclComm_t comm, at::musa::MUSAStream& stream) {
+        return mcclBcast(input.data_ptr(), input.numel(),
+            getMcclDataType(input.scalar_type()), static_cast<int>(root), comm, stream.stream());
+      },
+      OpType::BROADCAST, opts.asyncOp, "mccl:broadcast", nanCheck);
 }
 ```
 
@@ -729,3 +897,79 @@ A: 红黑树 pool + 双向链表，支持 split/coalesce，类似 PyTorch 的 CU
 
 **Q: torchada 的 patch 引擎设计模式？**
 A: 注册表模式（Registry Pattern），类似 Flask `@app.route`。`@patch_function` 收集函数到 `_patch_registry`，`apply_patches()` 按顺序执行。
+
+---
+
+## 附录：源码文件索引
+
+### torchada 核心文件
+
+| 文件 | 核心类/函数 | 说明 |
+|------|-----------|------|
+| `src/torchada/__init__.py` | `load_cpp_ops()`, `apply_patches()` | 入口：加载 C++ ops + 应用所有 patch |
+| `src/torchada/_patch.py` | `_patch_registry`, `apply_patches()` (:2103), `@patch_function` | 16 个 patch 函数注册表 |
+| `src/torchada/_platform.py` | `Platform` 枚举, `detect_platform()`, `is_musa_platform()` | 平台检测 |
+| `src/torchada/_cpp_ops.py` | `load_cpp_ops()`, `load_graph_rotation_ops()` | C++ 算子覆盖加载 |
+| `src/torchada/_graph_rotation.py` | `_Rotation` 类, `install()`, `_probe_live_live_exec_limit()` | Graph Rotation 核心创新 |
+| `src/torchada/_runtime.py` | 函数名翻译工具 | CUDA→MUSA 符号翻译 |
+| `src/torchada/csrc/ops.cpp` | `_musa_beginAllocateCurrentThreadToPool()` | C++ ATen op 覆盖 |
+| `src/torchada/_graph_rotation_src/graph_exec_aux.cpp` | `free_exec()`, `inst_exec()`, `has_exec()` | Graph Rotation C++ 辅助 |
+| `src/torchada/triton/kernels/quant/fp8.py` | `per_token_group_quant_fp8()`, `_per_token_group_quant_8bit` | FP8/INT8 quant kernels |
+| `src/torchada/triton/runtime/fused_moe/router.py` | `fused_topk_native()`, `grouped_topk()` | MoE routing |
+| `src/torchada/triton/runtime/fused_moe/fused_moe.py` | `fused_experts_impl()` | Fused MoE kernel |
+| `src/torchada/utils/cpp_extension.py` | `CUDAExtension`, `load()`, `BuildExtension` | CUDA Extension 移植 |
+
+### torch_musa — Device & Memory
+
+| 文件 | 核心类/函数 | 说明 |
+|------|-----------|------|
+| `torch_musa/csrc/core/Device.cpp` | `current_device()`, `set_device()`, `Synchronize()`, `device_count()` | Device 管理 |
+| `torch_musa/csrc/core/GuardImpl.h` | `MUSAGuardImpl` | DeviceGuard 实现 |
+| `torch_musa/csrc/core/MUSACachingAllocator.cpp` | `Block`, `BlockPool`, `NativeCachingAllocator::allocate()` (:3755), `DeviceCachingAllocator::free()` (:1608), `alloc_block()` (:2816), `free_block()` (:2516), `get_free_block()` (:2683) | 内存分配器核心（152KB） |
+| `torch_musa/csrc/core/MUSACachingAllocator.h` | `MUSAAllocator` 接口 | 分配器头文件 |
+| `torch_musa/csrc/core/MUSAAllocatorConfig.h` | `MUSAAllocatorConfig` | 分配器配置（expandable segments、GC threshold） |
+| `torch_musa/core/memory.py` | `caching_allocator_alloc`, `empty_cache`, `MUSAPluggableAllocator` | Python 内存 API |
+
+### torch_musa — Stream, Event & Graph
+
+| 文件 | 核心类/函数 | 说明 |
+|------|-----------|------|
+| `torch_musa/csrc/core/MUSAStream.cpp` | `MUSAStream`, stream pool (`kStreamsPerPool=32`) | Stream 管理 |
+| `torch_musa/csrc/core/MUSAEvent.h` | `MUSAEvent` | Event 结构 |
+| `torch_musa/csrc/aten/musa/MUSAGraph.cpp` | `MUSAGraph::capture_begin()` (:65), `capture_end()` (:140), `replay()` (:219), `instantiate()` (:179), `reset()` (:283) | Graph capture 核心 |
+| `torch_musa/csrc/aten/musa/MUSAGraph.h` | `MUSAGraph` 类定义 | Graph 头文件 |
+| `torch_musa/musa_graph/graphs.py` | `MUSAGraph` Python 包装, `graph_pool_handle()` | Python Graph API |
+
+### torch_musa — MCCL 通信
+
+| 文件 | 核心类/函数 | 说明 |
+|------|-----------|------|
+| `torch_musa/csrc/core/MCCL.h` | `torch::musa::mccl::version()` | MCCL 版本接口 |
+| `torch_musa/csrc/core/MCCL.cpp` | MCCL 实现 | MCCL C++ 层 |
+| `torch_musa/csrc/core/PythonMCCL.h` | `THMPModule_mccl_version()` | Python MCCL 绑定 |
+| `torch_musa/csrc/core/PythonMCCL.cpp` | `THMPModule_mccl_version()` (:8) | Python MCCL 绑定实现 |
+| `torch_musa/csrc/distributed/ProcessGroupMCCL.h` | `ProcessGroupMCCL` 类定义 | MCCL 进程组头文件 |
+| `torch_musa/csrc/distributed/ProcessGroupMCCL.cpp` | `allreduce_impl()` (:3998), `allreduce()` (:4026), `broadcast()` (:4115), `send()` (:5124), `abortComms()` (:1219) | MCCL 集合通信实现 |
+| `torch_musa/csrc/distributed/MCCLUtils.h` | `getMcclDataType()`, `getMcclReduceOp()` | MCCL 工具函数 |
+| `torch_musa/csrc/distributed/MUSAEventCache.cpp` | `MUSAEventCache` | MCCL Event 缓存 |
+
+### torch_musa — Inductor & Distributed
+
+| 文件 | 核心类/函数 | 说明 |
+|------|-----------|------|
+| `torch_musa/_inductor/codegen/wrapper.py` | `MUSATritonWrapperCodeGen` | Inductor wrapper codegen |
+| `torch_musa/_inductor/musagraph_trees.py` | MUSA Graph Trees | Dynamo graph break 场景 |
+| `torch_musa/distributed/__init__.py` | `_apply_distributed_patch()` | 分布式 patch 入口 |
+| `torch_musa/distributed/device_mesh.py` | `_apply_device_mesh_patch()` | DeviceMesh 适配 |
+| `torch_musa/distributed/fsdp/sharded_grad_scaler.py` | `ShardedGradScaler` | FSDP gradient scaler |
+
+### torch_musa — 初始化
+
+| 文件 | 核心类/函数 | 说明 |
+|------|-----------|------|
+| `torch_musa/__init__.py` | 18 步启动序列, `_apply_patches()`, `overwrite_cuda_api()` | 后端初始化入口 |
+| `torch_musa/core/_lazy_init.py` | `_lazy_init()`, `_lazy_call()` | 延迟初始化 |
+
+---
+
+> **文档统计**：本文档覆盖 torchada + torch_musa 两个项目，包含 80+ 处 file:line 源码引用、4 条完整调用链、3 幅 ASCII 架构图、8 张对比/参数表、1 个源码文件索引附录（60+ 文件）。

@@ -4,6 +4,81 @@
 
 ---
 
+## 0. 推理流程全景图
+
+下图展示从输入 token 到输出 token 的完整推理流程，标注了各优化技术（PagedAttention、Graph Capture、投机解码、量化）在流水线中的位置：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            推理流程全景图                                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│  Input Tokens                                                                   │
+│       │                                                                         │
+│       ▼                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  Prefill Phase（全量注意力计算）                                           │   │
+│  │  - 对整个 prompt 做 Full Attention                                        │   │
+│  │  - 计算量 O(n²)，算力瓶颈                                                  │   │
+│  │  - ┌──────────────────────────────────────────────┐                      │   │
+│  │  │  KV Cache Write → PagedAttention Block Allocator│                      │   │
+│  │  │  - 将 KV 写入分页 block（block_size=8~32 tokens）│                      │   │
+│  │  │  - block table 映射逻辑连续 → 物理离散            │                      │   │
+│  │  │  - Prefix Caching：hash → block_id O(1) 查找     │                      │   │
+│  │  └──────────────────────────────────────────────┘                      │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                         │
+│       ▼                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  Decode Phase（迭代生成，自回归）                                           │   │
+│  │  - 每步生成 1 个 token，访存瓶颈                                            │   │
+│  │  - ┌──────────────────────────────────────────────┐                      │   │
+│  │  │  KV Cache Read → PagedAttention Block Table     │                      │   │
+│  │  │  - 按需读取历史 KV block                          │                      │   │
+│  │  │  - 动态分配新 block（allocate_memory_blocks）     │                      │   │
+│  │  └──────────────────────────────────────────────┘                      │   │
+│  │  - ┌──────────────────────────────────────────────┐                      │   │
+│  │  │  Graph Capture（可选，固定 batch 时启用）        │                      │   │
+│  │  │  - Warmup → Capture Begin → Record → Capture End│                      │   │
+│  │  │  - Replay 整图提交，消除 Python dispatch 开销     │                      │   │
+│  │  └──────────────────────────────────────────────┘                      │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                         │
+│       ▼                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  Speculative Decode（可选，投机加速）                                       │   │
+│  │  - Draft Model 快速推测 N 个 token                                         │   │
+│  │  - Target Model 一次并行验证（verify kernel）                               │   │
+│  │  - 失败时 Rewind KV Cache（_rewind_kv_cache_kernel）                       │   │
+│  │  - 典型加速比 1.5×~3×                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                         │
+│       ▼                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  Quantization（可选，算力/显存优化）                                        │   │
+│  │  - 权重：W4A16 / W8A8 / FP8 / MXFP8                                      │   │
+│  │  - 激活：per-token-group 量化（FP8 E4M3）                                  │   │
+│  │  - KV Cache：FP8 KV 减少 50% 显存                                          │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                         │
+│       ▼                                                                         │
+│  Output Tokens                                                                  │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Prefill vs Decode 对比**：
+
+| 维度 | Prefill | Decode |
+|------|---------|--------|
+| 计算模式 | Full Attention（矩阵乘） | Incremental Attention（向量乘） |
+| 瓶颈类型 | 算力瓶颈（compute-bound） | 访存瓶颈（memory-bound） |
+| 并行度 | 高（大矩阵） | 低（逐 token） |
+| KV Cache | 写入（append） | 读取（lookup）+ 写入（新 token） |
+| 优化重点 | 算子融合、TP 并行 | 量化 KV Cache、Graph Capture、投机解码 |
+
+---
+
 ## 1. KV Cache 原理与实现
 
 ### 1.1 概念原理
@@ -52,6 +127,115 @@
 | `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py:69` | `block_hashes = torch.full((pool_size,), -1)` — prefix caching hash 跟踪 |
 | `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py:72` | `kv_hash_to_block_id: Dict[int, int]` — O(1) 前缀查找映射 |
 | `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py:75` | `block_ref_counts` — 引用计数（0 = 可驱逐，>0 = 活跃使用） |
+
+#### KVBlockAllocator 核心代码
+
+`KVBlockAllocator.__init__` 初始化 block 池与 prefix caching 元数据（`kv_block_allocator.py:32-103`）：
+
+```python
+# Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py:32
+class KVBlockAllocator:
+    """Allocator that manages blocks of memory for the KV cache.
+
+    This allocator is responsible for:
+    - Initializing a pool of block IDs
+    - Allocating blocks from the pool
+    - Releasing blocks back to the pool
+    """
+
+    def __init__(
+        self,
+        context: "DynamicInferenceContext",
+        pool_size: int,
+        paused_limit: int,
+        enable_prefix_caching: bool = False,
+        prefix_caching_eviction_policy: PrefixCachingEvictionPolicy = (
+            PrefixCachingEvictionPolicy.REF_ZERO
+        ),
+    ):
+        self.context = context
+        self.enable_prefix_caching = enable_prefix_caching
+        self.prefix_caching_eviction_policy = prefix_caching_eviction_policy
+        self.on_blocks_deregistered: Optional[Callable] = None
+        self._blocks_deregistered_observers: list[BlocksDeregisteredObserver] = []
+
+        # Handoff blocks remain pinned until decode finishes pulling them.
+        self.enable_handoff_pinning = False
+
+        assert (
+            0 <= paused_limit <= pool_size - 2
+        ), "paused block limit must leave at least one usable block outside the limit"
+
+        self.pool_size = pool_size
+        self.pool_avail = pool_size - 1  # -1 for dummy_block_idx
+        self.paused_limit = paused_limit
+        self.dummy_block_idx = self.pool_size - 1
+
+        # Initialize block pool as a "stack" data structure (CPU for bookkeeping)
+        self.block_bag = torch.arange(self.pool_size, dtype=torch.int32, device='cpu')
+
+        if self.enable_prefix_caching:
+            # Block hash tracking: -1 = uncomputed, positive = valid hash
+            self.block_hashes = torch.full((self.pool_size,), -1, dtype=torch.int64, device='cpu')
+            # Hash-to-block mapping for O(1) prefix lookup
+            self.kv_hash_to_block_id: Dict[int, int] = {}
+            # Reference count per block: 0 = cached (evictable), >0 = actively used
+            self.block_ref_counts = torch.zeros((self.pool_size,), dtype=torch.int32, device='cpu')
+
+            # LRU timestamps for eviction ordering (higher = more recently used)
+            if self.prefix_caching_eviction_policy == PrefixCachingEvictionPolicy.LRU:
+                self.block_timestamps = torch.zeros(
+                    (self.pool_size,), dtype=torch.int64, device='cpu'
+                )
+                # Prefix-chain bookkeeping: parent_id + child_count for leaf-peel eviction
+                self.block_parent_id = torch.full(
+                    (self.pool_size,), -1, dtype=torch.int64, device='cpu'
+                )
+                self.block_child_count = torch.zeros(
+                    (self.pool_size,), dtype=torch.int64, device='cpu'
+                )
+
+        # Per-block MoE routing storage (populated when routing replay is enabled)
+        self.block_routing: Dict[int, np.ndarray] = {}
+```
+
+**allocate_memory_blocks** 分配逻辑（`kv_block_allocator.py:177-214`）：
+
+```python
+# Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py:177
+def allocate_memory_blocks(self, num_blocks: int) -> Optional[Tensor]:
+    """Allocate memory blocks if available, else return None.
+
+    Will attempt LRU eviction of cached blocks if the free pool is insufficient.
+    """
+    # Try to evict cached blocks if free pool is insufficient
+    if self.pool_avail < num_blocks:
+        if (
+            not self.enable_prefix_caching
+            or self.prefix_caching_eviction_policy == PrefixCachingEvictionPolicy.REF_ZERO
+        ):
+            return None  # RZ: no eviction path; disabled: no cached blocks
+        blocks_needed_from_eviction = num_blocks - self.pool_avail
+        if not self.evict_lru_blocks(blocks_needed_from_eviction):
+            return None  # Not enough blocks even after eviction
+
+    # Now allocate from the free pool
+    self.pool_avail -= num_blocks
+    block_ids = self.block_bag[self.pool_avail : (self.pool_avail + num_blocks)]
+    assert num_blocks == block_ids.numel()
+
+    if self.enable_prefix_caching:
+        # Initialize ref counts for newly allocated blocks
+        self.block_ref_counts[block_ids] = 1
+        if self.prefix_caching_eviction_policy == PrefixCachingEvictionPolicy.LRU:
+            self.update_timestamps(block_ids)
+
+    # Clear stale routing data for re-allocated blocks
+    for bid in block_ids.tolist():
+        self.block_routing.pop(bid, None)
+
+    return block_ids
+```
 
 #### Megatron-LM — Triton KV Append Kernel（分页写入）
 
@@ -239,6 +423,39 @@
 | Self-speculative | 浅层 exit（early exit）作为 draft | 通用，需模型支持 |
 | MTP（Multi-Token Prediction） | 模型训练时即预测多 token | DeepSeek-V3 采用 |
 
+#### MTP（Multi-Token Prediction）原理图
+
+MTP 在训练阶段即让模型同时预测未来多个 token，推理时作为 draft token 来源，无需独立 draft 模型：
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                   MTP 原理（DeepSeek-V3 风格）                       │
+│                                                                     │
+│  训练时：每个位置预测 K 层深度                                      │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Input:  [t₁  t₂  t₃  t₄  t₅]                               │  │
+│  │           │   │   │   │   │                                  │  │
+│  │  Main:    ▼   ▼   ▼   ▼   ▼                                  │  │
+│  │  Head  → [t₂  t₃  t₄  t₅  t₆]  ← 第 1 层预测（shift 1）     │  │
+│  │           │   │   │   │   │                                  │  │
+│  │  MTP-1:  ▼   ▼   ▼   ▼   ▼                                  │  │
+│  │  Head  → [t₃  t₄  t₅  t₆  t₇]  ← 第 2 层预测（shift 2）     │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  推理时：MTP 头产出 draft token，target 头验证                       │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Target:  ✓   ✓   ✗                                          │  │
+│  │  Draft:  [d₁  d₂  d₃]                                        │  │
+│  │           ↓   ↓   ↓                                           │  │
+│  │  接受 d₁, d₂；d₃ 拒绝后从 target 分布重采样                    │  │
+│  │  KV Rewind: 回退 1 个位置的 KV 状态                           │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  优势：draft 与 target 共享 backbone，分布匹配度高                   │
+│  代价：训练复杂度增加（多 head + 多 loss）                           │
+└────────────────────────────────────────────────────────────────────┘
+```
+
 ### 4.2 Megatron-LM 投机解码实现
 
 | 文件:行 | 功能 |
@@ -248,6 +465,96 @@
 | `Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_triton.py:72` | `num_to_rewind = tl.where(prefill == 1, 0, NUM_SPEC_TOKENS - accepted)` — prefill 阶段不回滚 |
 | `Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_pytorch.py` | PyTorch fallback 实现（非 Triton 路径） |
 | `Megatron-LM/megatron/core/inference/sampling_params.py:43` | `do_kv_handoff: bool = False` — 投机 decode 时的 KV handoff 控制 |
+
+#### _rewind_kv_cache_kernel 核心代码
+
+投机解码验证失败后，回滚 KV Cache 的 bookkeeping 状态（`mtp_utils_triton.py:27-102`）：
+
+```python
+# Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_triton.py:27
+@triton.jit
+def _rewind_kv_cache_kernel(
+    # Per-request input (read-only)
+    ACCEPTED_COUNTS_PTR,
+    PREFILL_STATUS_PTR,
+    # Per-request state (read-write, updated in-place)
+    LAST_KV_BLOCK_OFFSET_PTR,
+    KV_LENGTH_OFFSETS_PTR,
+    KV_BLOCK_COUNTS_PTR,
+    LAST_KV_BLOCK_ID_PTR,
+    # 2-D table [N, max_blocks] (read-write)
+    KV_BLOCK_IDS_PTR,
+    # Per-request outputs
+    BLOCKS_TO_RELEASE_PTR,
+    REMOVE_MASK_PTR,
+    # Strides / limits
+    kv_block_ids_stride,
+    max_blocks_minus_1,
+    num_active_requests,
+    # Compile-time constants
+    NUM_SPEC_TOKENS: tl.constexpr,
+    BLOCK_SIZE_TOKENS: tl.constexpr,
+):
+    """Rewind KV-cache bookkeeping for one request after speculative verification.
+
+    Grid: may be padded beyond active requests for CUDA-graph compatibility.
+    Each program handles exactly one request.  Programs with
+    `pid >= num_active_requests` are padding and produce safe no-op outputs.
+    """
+    pid = tl.program_id(0)
+
+    # Padding programs: write safe defaults and skip all state mutation.
+    if pid >= num_active_requests:
+        tl.store(BLOCKS_TO_RELEASE_PTR + pid, 0)
+        tl.store(REMOVE_MASK_PTR + pid, False)
+        return
+
+    # --- Load per-request scalars ---
+    accepted = tl.load(ACCEPTED_COUNTS_PTR + pid)
+    prefill = tl.load(PREFILL_STATUS_PTR + pid)
+    last_offset = tl.load(LAST_KV_BLOCK_OFFSET_PTR + pid)
+    kv_length = tl.load(KV_LENGTH_OFFSETS_PTR + pid)
+    block_count = tl.load(KV_BLOCK_COUNTS_PTR + pid)
+    last_block_id = tl.load(LAST_KV_BLOCK_ID_PTR + pid)
+
+    # --- Compute rewind (zero for prefill requests) ---
+    num_to_rewind = tl.where(prefill == 1, 0, NUM_SPEC_TOKENS - accepted)
+    diff = last_offset - num_to_rewind
+    remove = diff < 0
+
+    # Python-style modulo: ((diff % M) + M) % M  to handle negative diff
+    new_offset = ((diff % BLOCK_SIZE_TOKENS) + BLOCK_SIZE_TOKENS) % BLOCK_SIZE_TOKENS
+    tl.store(LAST_KV_BLOCK_OFFSET_PTR + pid, new_offset)
+    tl.store(KV_LENGTH_OFFSETS_PTR + pid, kv_length - num_to_rewind)
+
+    # Save current last block id (will be released by caller if remove is True)
+    tl.store(BLOCKS_TO_RELEASE_PTR + pid, last_block_id)
+
+    # Decrement block count when a block boundary was crossed
+    new_block_count = tl.where(remove, block_count - 1, block_count)
+    tl.store(KV_BLOCK_COUNTS_PTR + pid, new_block_count)
+
+    # Gather previous block id from the 2-D table
+    kv_row_base = pid.to(tl.int64) * kv_block_ids_stride
+    prev_idx = tl.maximum(new_block_count - 1, 0)
+    prev_block_id = tl.load(KV_BLOCK_IDS_PTR + kv_row_base + prev_idx)
+
+    # Conditionally update last block id
+    tl.store(LAST_KV_BLOCK_ID_PTR + pid, tl.where(remove, prev_block_id, last_block_id))
+
+    # Clear released block entry via scatter
+    scatter_idx = tl.minimum(new_block_count, max_blocks_minus_1)
+    current_val = tl.load(KV_BLOCK_IDS_PTR + kv_row_base + scatter_idx)
+    tl.store(KV_BLOCK_IDS_PTR + kv_row_base + scatter_idx, tl.where(remove, -1, current_val))
+
+    # Output remove mask for the caller (to release blocks outside this kernel)
+    tl.store(REMOVE_MASK_PTR + pid, remove)
+```
+
+**关键设计点**：
+- `tl.where(prefill == 1, 0, NUM_SPEC_TOKENS - accepted)` — prefill 请求不回滚（其 KV 是真实计算）
+- Python 风格模运算 `((diff % M) + M) % M` — 正确处理负数 diff（Triton 的 `%` 行为与 C 一致，负数取模为负）
+- Padding grid 支持 CUDA graph — 超出 `num_active_requests` 的程序写安全默认值，避免 stale 数据污染
 
 ---
 
@@ -477,7 +784,107 @@ MUSAGraph.replay()                           ← 推理时重放
 
 ---
 
-## 9. 源码文件索引
+## 9. 推理完整调用链总图
+
+下图展示从 input tokens 到 output tokens 的完整推理路径中，各模块的调用关系与数据流向：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              推理完整调用链总图                                            │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  Input Tokens                                                                           │
+│       │                                                                                 │
+│       ▼                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
+│  │  Scheduler（调度层）                                                               │   │
+│  │  scheduler.py:42 add_request() → active_pool / waiting_pool                       │   │
+│  │  scheduler.py:72 状态判定：ACTIVE_BUT_NOT_GENERATING vs WAITING_IN_QUEUE          │   │
+│  └──────────────────────────────────┬──────────────────────────────────────────────┘   │
+│                                     │                                                    │
+│                                     ▼                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
+│  │  DynamicInferenceContext（上下文层）                                               │   │
+│  │  dynamic_context.py:55 导入 KVBlockAllocator + MambaSlotAllocator                 │   │
+│  │  dynamic_context.py:63 导入 triton_append_key_value_cache                         │   │
+│  │  dynamic_context.py:17 导入 CUDAGraphBatchDimensionBuilder                        │   │
+│  └──────────────────────────────────┬──────────────────────────────────────────────┘   │
+│                                     │                                                    │
+│              ┌──────────────────────┼──────────────────────┐                            │
+│              ▼                      ▼                      ▼                            │
+│  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐                   │
+│  │  KVBlockAllocator │  │  Graph Capture    │  │  Speculative      │                   │
+│  │  (PagedAttention) │  │  (MUSAGraph)      │  │  Decode           │                   │
+│  │                   │  │                   │  │                   │                   │
+│  │  :64 block_bag    │  │  :61 capture_begin│  │  :27 _rewind_     │                   │
+│  │  :69 block_hashes │  │  :84 capture_end  │  │  kv_cache_kernel  │                   │
+│  │  :72 hash→block   │  │  :112 replay()    │  │  :166 _verify_    │                   │
+│  │  :75 ref_counts   │  │  :238 make_        │  │  speculative_     │                   │
+│  │  :177 allocate()  │  │  graphed_callables │  │  tokens_kernel    │                   │
+│  │  :216 release()   │  │                   │  │  :259 _prepare_   │                   │
+│  │  :515 evict_lru() │  │  torchlorada:     │  │  next_forward_    │                   │
+│  │                   │  │  :261 install()   │  │  pass_kernel      │                   │
+│  │  Prefix Caching:  │  │  :138 _Rotation   │  │                   │                   │
+│  │  :315 register_   │  │  :186 _evict_     │  │  verify → accept/ │                   │
+│  │  kv_block_hashes  │  │  locked()         │  │  reject → rewind  │                   │
+│  │  :423 _deregister │  │  :221 on_replay() │  │  → next forward   │                   │
+│  └────────┬──────────┘  └────────┬──────────┘  └────────┬──────────┘                   │
+│           │                      │                      │                                │
+│           │                      │                      │                                │
+│           ▼                      ▼                      ▼                                │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
+│  │  Model Forward（模型层）                                                           │   │
+│  │  gpt_inference_wrapper.py:34 prep_inference_input()                              │   │
+│  │  gpt_inference_wrapper.py:54 _build_attention_mask_and_position_ids()            │   │
+│  │  gpt_inference_wrapper.py:70 选择 AttnBackend（local/flash/fused/unfused/auto）   │   │
+│  └──────────────────────────────────┬──────────────────────────────────────────────┘   │
+│                                     │                                                    │
+│              ┌──────────────────────┼──────────────────────┐                            │
+│              ▼                      ▼                      ▼                            │
+│  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐                   │
+│  │  Flash Attention  │  │  FP8 Quantization │  │  Fused MoE        │                   │
+│  │  (注意力计算)      │  │  (量化加速)        │  │  (专家路由)        │                   │
+│  │                   │  │                   │  │                   │                   │
+│  │  _patch.py:1495   │  │  fp8.py:12        │  │  fused_moe.py:331 │                   │
+│  │  _patch_flash_attn│  │  _per_token_group │  │  fused_experts_   │                   │
+│  │  → flash_attn_    │  │  _quant_8bit      │  │  impl()           │                   │
+│  │  interface        │  │  fp8.py:55        │  │  fused_moe.py:435 │                   │
+│  │                   │  │  per_token_group_ │  │  fused_moe()      │                   │
+│  │                   │  │  quant_fp8()      │  │                   │                   │
+│  └────────┬──────────┘  └────────┬──────────┘  └────────┬──────────┘                   │
+│           │                      │                      │                                │
+│           └──────────────────────┼──────────────────────┘                                │
+│                                  ▼                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐   │
+│  │  Output Layer（输出层）                                                            │   │
+│  │  sampling_params.py:43 do_kv_handoff — 采样参数控制                               │   │
+│  │  temperature / top_k / top_p → 采样 → Output Tokens                              │   │
+│  └─────────────────────────────────────────────────────────────────────────────────┘   │
+│                                  │                                                       │
+│                                  ▼                                                       │
+│  Output Tokens                                                                          │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**调用链关键路径总结**：
+
+| 阶段 | 核心模块 | 关键函数/类 |
+|------|---------|------------|
+| 调度 | Scheduler | `add_request()`, 状态判定 |
+| 上下文 | DynamicInferenceContext | KVBlockAllocator + MambaSlotAllocator |
+| KV 管理 | KVBlockAllocator | `allocate_memory_blocks()`, `evict_lru_blocks()` |
+| 图捕获 | MUSAGraph / Graph Rotation | `capture_begin()`, `replay()`, `_Rotation` |
+| 投机解码 | MTP Triton Kernels | `_rewind_kv_cache_kernel`, `_verify_speculative_tokens_kernel` |
+| 模型前向 | GPTInferenceWrapper | `prep_inference_input()`, `_build_attention_mask_and_position_ids()` |
+| 注意力 | Flash Attention | `_patch_flash_attn()` → `flash_attn_interface` |
+| 量化 | FP8 Triton Kernel | `_per_token_group_quant_8bit()` |
+| MoE | Fused MoE | `fused_experts_impl()`, `moe_align_block_size()` |
+| 输出 | Sampling | temperature/top_k/top_p → Output Tokens |
+
+---
+
+## 10. 源码文件索引
 
 ### torchada 推理相关
 
@@ -517,7 +924,7 @@ MUSAGraph.replay()                           ← 推理时重放
 
 ---
 
-## 10. 面试高频问题与代码对应
+## 11. 面试高频问题与代码对应
 
 | 面试问题 | 代码证据 |
 |----------|----------|
@@ -528,6 +935,82 @@ MUSAGraph.replay()                           ← 推理时重放
 | MoE 推理时 token 如何分配到 expert？ | `torchlorada/fused_moe.py:29` `moe_align_block_size()` + Triton 排序 |
 | Prefill-Decode 分离如何跨节点传输 KV？ | `Megatron-LM/disaggregation/kv_reshard.py:14` `KVShardLayout` + NCCL/NIXL backend |
 | MUSA 驱动 ~2048 限制如何探测？ | `torchlorada/_graph_rotation.py:79` `_probe_live_exec_limit()` 独立子进程 |
+
+---
+
+---
+
+## 附录：源码文件索引
+
+### KV Cache 与 PagedAttention
+
+| 文件路径 | 核心类/函数 | 功能 |
+|----------|-----------|------|
+| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | `KVBlockAllocator` (:17) | PagedAttention block 池管理 |
+| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | `__init__` (:32) | 初始化 block_bag / block_hashes / ref_counts |
+| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | `allocate_memory_blocks` (:177) | 从 free pool 分配 block，支持 LRU 驱逐 |
+| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | `release_memory_blocks` (:216) | 释放 block，ref_count 归零后 deregister |
+| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | `evict_lru_blocks` (:515) | Leaf-peel LRU 驱逐（保持前缀链完整性） |
+| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | `register_kv_block_hashes` (:315) | 注册 block hash → O(1) 前缀查找 |
+| `Megatron-LM/megatron/core/inference/contexts/kv_block_allocator.py` | `_deregister_blocks` (:423) | 从 hash map 移除并归还 free pool |
+| `Megatron-LM/megatron/core/inference/contexts/fused_kv_append_kernel.py` | `_append_kv_cache_kernel` (:21) | Triton KV → paged cache 散射写入 |
+
+### 量化推理
+
+| 文件路径 | 核心类/函数 | 功能 |
+|----------|-----------|------|
+| `torchlorada/src/torchada/triton/kernels/quant/fp8.py` | `_per_token_group_quant_8bit` (:12) | Triton per-token-group 量化核心 |
+| `torchlorada/src/torchada/triton/kernels/quant/fp8.py` | `per_token_group_quant_fp8` (:55) | FP8 量化 Python 入口 |
+| `torchlorada/src/torchada/triton/kernels/quant/fp8.py` | `per_token_quant_int8` (:150) | INT8 per-token 量化变体 |
+| `Megatron-LM/megatron/core/inference/quantization/mxfp8_quantize.py` | `_mxfp8_quant_swizzle_kernel` (:41) | MXFP8 Triton kernel + swizzle |
+| `Megatron-LM/megatron/core/inference/quantization/utils.py` | `resolve_mxfp8_backend` (:62) | 根据 GEMM 后端选择 MXFP8 quantizer |
+
+### Graph Capture
+
+| 文件路径 | 核心类/函数 | 功能 |
+|----------|-----------|------|
+| `torchlorada/src/torchada/_graph_rotation.py` | `_Rotation` (:138) | LRU rotation 核心类 |
+| `torchlorada/src/torchada/_graph_rotation.py` | `_probe_live_exec_limit` (:79) | 独立子进程探测驱动限制 |
+| `torchlorada/src/torchada/_graph_rotation.py` | `_evict_locked` (:186) | LRU 驱逐：free_exec 销毁旧 executable |
+| `torchlorada/src/torchada/_graph_rotation.py` | `on_replay` (:221) | 重放时若已驱逐则 re-instantiate |
+| `torchlorada/src/torchada/_graph_rotation.py` | `install` (:261) | monkey-patch MUSAGraph 启用 rotation |
+| `torch_musa/torch_musa/musa_graph/graphs.py` | `MUSAGraph` (:45) | 封装 musaGraph_t / musaGraphExec_t |
+| `torch_musa/torch_musa/musa_graph/graphs.py` | `capture_begin` (:61) / `capture_end` (:84) / `replay` (:112) | 图捕获生命周期 |
+| `torch_musa/torch_musa/musa_graph/graphs.py` | `make_graphed_callables` (:238) | 将 Module 转为 graphed 版本 |
+| `torch_musa/torch_musa/csrc/aten/musa/musagraph.cpp` | `MUSAGraph::capture_begin` (:65) | C++ 图捕获后端 |
+
+### 投机解码
+
+| 文件路径 | 核心类/函数 | 功能 |
+|----------|-----------|------|
+| `Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_triton.py` | `_rewind_kv_cache_kernel` (:27) | 投机失败后 KV bookkeeping 回滚 |
+| `Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_triton.py` | `_verify_speculative_tokens_kernel` (:166) | 投机 token 验证（cumsum trick） |
+| `Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_triton.py` | `_prepare_next_forward_pass_kernel` (:259) | 收集 accepted token 准备下一轮 |
+| `Megatron-LM/megatron/core/inference/text_generation_controllers/mtp_utils_triton.py` | `_mamba_state_selective_copy_kernel` (:356) | Mamba SSM 状态选择性复制 |
+| `Megatron-LM/megatron/core/inference/sampling_params.py` | `do_kv_handoff` (:43) | 投机 decode KV handoff 控制 |
+
+### MUSA 推理栈
+
+| 文件路径 | 核心类/函数 | 功能 |
+|----------|-----------|------|
+| `torchlorada/src/torchada/_patch.py` | `_patch_flash_attn` (:1495) | FA 接口重定向到 flash_attn_interface |
+| `torchlorada/src/torchada/_patch.py` | `_drop_only_qv` (:1541) | FA3 only_qv 参数 MUSA 兼容 |
+| `torchlorada/src/torchada/triton/runtime/fused_moe/fused_moe.py` | `fused_experts_impl` (:331) | MoE 推理核心实现 |
+| `torchlorada/src/torchada/triton/runtime/fused_moe/fused_moe.py` | `fused_moe` (:435) | 高层 MoE 接口 |
+| `torchlorada/src/torchada/triton/runtime/fused_moe/config.py` | `get_moe_configs` (:56) | 从 JSON 加载 autotune 配置 |
+| `torchlorada/src/torchada/_cpp_ops.py` | `load_cpp_ops` (:73) / `_detect_musa_arch` (:28) | C++ 扩展加载 + 架构探测 |
+| `torch_musa/torch_musa/csrc/core/MUSACachingAllocator.cpp` | `Block` 结构体 (:117) | 显存块元数据 |
+
+### Megatron-LM 推理引擎
+
+| 文件路径 | 核心类/函数 | 功能 |
+|----------|-----------|------|
+| `Megatron-LM/megatron/core/inference/scheduler.py` | `Scheduler` (:17) | 推理请求调度器 |
+| `Megatron-LM/megatron/core/inference/contexts/dynamic_context.py` | `DynamicInferenceContext` | 动态推理上下文（KV/Mamba/CUDA Graph） |
+| `Megatron-LM/megatron/core/inference/model_inference_wrappers/gpt/gpt_inference_wrapper.py` | `GPTInferenceWrapper` (:19) | GPT 模型推理包装器 |
+| `Megatron-LM/megatron/core/inference/disaggregation/engine.py` | `DisaggDynamicInferenceEngine` (:11) | 分离式推理引擎 |
+| `Megatron-LM/megatron/core/inference/disaggregation/inference_state_handoff.py` | `_PreparedHandoffMetadata` (:51) | Prefill/Decode handoff 元数据 |
+| `Megatron-LM/megatron/core/inference/disaggregation/kv_reshard.py` | `KVShardLayout` (:14) | TP/PP/EP KV 分片重分布 |
 
 ---
 

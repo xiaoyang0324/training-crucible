@@ -118,11 +118,11 @@ Every technical claim cites a **local source repo** (file path + line number) as
 
 | Module | Files | Lines | Core |
 |--------|-------|-------|------|
-| Knowledge | 8 | ~6373 | 8-file knowledge Q&A (pretraining + RL + post-training + inference + hardware-adapter + MoE + DeepSpeed + PyTorch) |
-| Precision | 3 | ~1500 | 5-step diagnosis + failure taxonomy + known patterns |
-| Performance | 3 | ~1800 | 5-step optimization + bottleneck taxonomy + SOTA techniques |
-| Tickets | 7 | ~490 | Template + SKILL.md + 5 seed cases |
-| References | 3 | ~800 | Source repo map + glossary + answer conventions |
+| Knowledge | 8 | ~9074 | 8-file knowledge Q&A (pretraining + RL + post-training + inference + hardware-adapter + MoE + DeepSpeed + PyTorch) |
+| Precision | 3 | ~887 | 5-step diagnosis + failure taxonomy + known patterns |
+| Performance | 3 | ~1225 | 5-step optimization + bottleneck taxonomy + SOTA techniques |
+| Tickets | 7 | ~681 | Template + SKILL.md + 5 seed cases |
+| References | 3 | ~1362 | Source repo map + glossary + answer conventions |
 
 ---
 
