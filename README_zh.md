@@ -64,7 +64,8 @@ training-crucible/
 │   ├── inference.md                #   KV Cache · 量化 · 投机解码
 │   ├── hardware-adapter.md         #   硬件适配层 (torchada + torch_musa)
 │   ├── moe.md                      #   MoE 跨仓库深度分析
-│   └── deepspeed.md                #   DeepSpeed 深度分析
+│   ├── deepspeed.md                #   DeepSpeed 深度分析
+│   └── pytorch.md                  #   PyTorch 核心特性分析
 ├── skill-precision/                      # 精度专家
 │   ├── SKILL.md                    #   捕获→分类→定位→假设→解决
 │   └── references/                 #   故障分类 · 已知模式
@@ -76,7 +77,7 @@ training-crucible/
 │   ├── TEMPLATE.md                 #   YAML frontmatter + 8 段正文
 │   └── *.md                        #   来自真实项目的种子案例
 └── skill-references/                     # 共享参考
-    ├── source-repo-map.md          #   7 仓 → 阶段映射
+    ├── source-repo-map.md          #   8 仓 → 阶段映射
     ├── training-glossary.md        #   90 个规范术语
     └── answer-conventions.md       #   回答规范 + 输出模板
 ```
@@ -103,6 +104,7 @@ training-crucible/
 
 | 源码仓 | 阶段 | 硬件 |
 |--------|------|------|
+| PyTorch | 基础框架 (nn/autograd/optim/distributed/FSDP2/DTensor) | CUDA GPU |
 | Megatron-LM | 预训练、后训练、MoE | NVIDIA GPU |
 | torchtitan | 预训练、RL | NVIDIA GPU |
 | DeepSpeed | 预训练优化 (ZeRO/MoE/PP) | NVIDIA GPU |
@@ -117,7 +119,7 @@ training-crucible/
 
 | 模块 | 文件数 | 行数 | 核心能力 |
 |------|--------|------|----------|
-| 知识专家 | 7 | ~5244 | 7 文件知识问答 (预训练 + RL + 后训练 + 推理 + 硬件适配 + MoE + DeepSpeed) |
+| 知识专家 | 8 | ~6373 | 8 文件知识问答 (预训练 + RL + 后训练 + 推理 + 硬件适配 + MoE + DeepSpeed + PyTorch) |
 | 精度专家 | 3 | ~1500 | 5 步诊断 + 故障分类 + 已知模式 |
 | 性能专家 | 3 | ~1800 | 5 步优化 + 瓶颈分类 + SOTA 技术 |
 | 问题归档 | 7 | ~490 | 模板 + SKILL.md + 5 个种子 ticket |

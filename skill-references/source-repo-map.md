@@ -820,36 +820,149 @@ deepspeed/moe/layer.py:17  MoE
 
 ---
 
-## 8. 跨仓库技术对比表
+## 8. PyTorch
 
-| 技术点 | Megatron-LM | torchtitan | DeepSpeed | miles | slime | torchada | torch_musa |
-|--------|------------|-----------|-----------|-------|-------|----------|-----------|
-| **并行策略** | TP+PP+DP+EP+CP | TP+PP+DP+CP | TP+PP+DP+EP | 继承后端 | 继承后端 | N/A | N/A |
-| **TP 实现** | ColumnParallelLinear | DTensor-based | module_inject | 继承 Megatron | 继承 Megatron | N/A | N/A |
-| **PP 调度** | 1F1B / Interleaved | pipeline_llm | 1F1B PipelineEngine | 继承 Megatron | 继承 Megatron | N/A | N/A |
-| **DP 实现** | DistributedOptimizer (ZeRO-1) | FSDP2 (DTensor) | ZeRO-1/2/3 | FSDP2 / 继承 | 继承 Megatron | N/A | N/A |
-| **EP 实现** | MoE 原生 EP | N/A | MoE EP (TokenChoice) | 继承 Megatron | 继承 Megatron | N/A | N/A |
-| **CP 实现** | 原生 CP + Hybrid CP | context_parallel | N/A | cp_utils.py | cp_utils.py | N/A | N/A |
-| **Recompute** | checkpointed_forward | FullAC / SelectiveAC / MemoryBudgetAC | activation_checkpointing | 继承后端 | 继承后端 | N/A | N/A |
-| **CUDA Graph** | 原生 CUDA Graph | CUDAGraphWrapper | N/A | 继承后端 | 继承后端 | _Rotation (LRU) | MUSAGraph |
-| **FP8 支持** | Transformer Engine FP8 | Float8LinearConverter | N/A | N/A | N/A | Triton FP8 kernel | N/A |
-| **FP4 支持** | NVFP4 | N/A | N/A | N/A | N/A | N/A | N/A |
-| **MoE 实现** | MoELayer + TopKRouter | N/A | MoE + TopKGate | 继承 Megatron | 继承 Megatron | Fused MoE Triton | N/A |
-| **RL 支持** | 仅训练后端 | TitanRL 实验 | N/A | GRPO/PPO 完整 | GRPO/PPO + Agentic | N/A | N/A |
-| **Weight Sync** | N/A | N/A | N/A | UpdateWeight | UpdateWeightFromDistributed | N/A | N/A |
-| **Rollout 引擎** | N/A | N/A | N/A | SGLang | SGLang | N/A | N/A |
-| **True On-Policy** | N/A | N/A | N/A | true_on_policy/ | N/A | N/A | N/A |
-| **Checkpoint** | Dist checkpointing | DCP (Distributed CP) | checkpoint_engine | 继承后端 | 继承后端 | N/A | N/A |
-| **编译** | N/A | torch.compile | compile | 继承后端 | 继承后端 | N/A | Inductor |
-| **硬件支持** | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | Ada/RTX + MUSA | MUSA GPU |
-| **Ray 编排** | N/A | N/A | N/A | 完整支持 | 完整支持 | N/A | N/A |
-| **Fault Tolerance** | 基础容错 | N/A | N/A | 完整 FT | 基础容错 | N/A | N/A |
-| **内存优化** | ZeRO-1 + Recompute | FSDP2 + AC | ZeRO-3 + Offload | 继承后端 | 继承后端 | Graph Rotation | CachingAllocator |
-| **配置系统** | argparse + ConfigContainer | tyro-based | JSON ds_config | argparse | argparse | env vars | env vars |
+### 8.1 定位与设计理念
+
+PyTorch 是**底层基础框架**，上层所有训练仓（Megatron/torchtitan/DeepSpeed/miles/slime）都构建于其上：
+- **nn.Module**：模型定义与参数注册的标准接口
+- **autograd**：自动微分引擎，backward() 驱动训练
+- **distributed**：ProcessGroup + 集合通信原语
+- **FSDP2**：PyTorch 原生的参数分片并行（FullyShardedDataParallel）
+- **DTensor + Tensor Parallel**：分布式张量抽象 + TP 风格
+- **Pipeline Parallel**：PipelineStage + 1F1B/Interleaved 调度
+- **DCP**：分布式 checkpoint（get_state_dict / set_state_dict）
+- **CUDA Graph / CachingAllocator**：CUDA 图捕获与显存管理
+- **torch.compile (Inductor)**：编译后端，融合算子优化
+
+**与上层框架的关系**：
+- Megatron 的 ColumnParallelLinear 继承 nn.Module，TP 通信调用 torch.distributed
+- torchtitan 的 FSDP2 直接调用 torch.distributed.fsdp
+- DeepSpeed 通过 module_inject 替换 nn.Module 子模块
+- miles/slime 的 Ray 编排基于 torch.multiprocessing.spawn
+
+**工作定位**：当问题涉及"nn.Module 如何注册参数"、"FSDP2 原理"、"DTensor 是什么"、"torch.compile 如何工作"、"CUDA Graph 捕获流程"时，**首选引用此仓**。
+
+### 8.2 核心架构（ASCII 图）
+
+```
+torch.nn.Module (模型定义)
+  │
+  ├─ _parameters: Dict[str, Parameter]     ← 参与梯度的参数
+  ├─ _buffers: Dict[str, Tensor]           ← 不参与梯度的状态
+  ├─ _modules: Dict[str, Module]           ← 子模块树
+  │
+  └─ __call__() → forward()                ← 前向计算
+       │
+       └─ autograd.backward()               ← 反向传播
+            │
+            └─ Optimizer.step()             ← 参数更新
+
+torch.distributed (分布式通信)
+  │
+  ├─ init_process_group()                  ← 初始化进程组
+  ├─ ProcessGroup                          ← 进程组抽象
+  ├─ all_reduce / broadcast / all_gather   ← 集合通信原语
+  │
+  ├─ fsdp.FullyShardedDataParallel         ← FSDP2 参数分片
+  ├─ tensor.parallel                       ← Tensor Parallel 风格
+  ├─ pipelining.PipelineStage              ← Pipeline Parallel
+  └─ checkpoint (DCP)                      ← 分布式 checkpoint
+
+torch.cuda (CUDA 基础设施)
+  │
+  ├─ CUDAGraph                             ← CUDA 图捕获/重放
+  ├─ CUDACachingAllocator                  ← 显存分配器
+  ├─ Stream / Event                        ← 流与事件同步
+  └─ NCCL                                  ← 通信库封装
+```
+
+### 8.3 核心调用链
+
+**模型构建链：**
+```
+class MyModel(nn.Module):
+  → __init__(): 注册 _parameters/_buffers/_modules
+  → forward(): 定义计算图
+  → __call__(): 触发 _forward_pre_hooks → forward → _forward_hooks
+```
+
+**FSDP2 前向链：**
+```
+FullyShardedDataParallel.forward()
+  → _flat_param.py: FlatParameter      ← 参数展平
+  → all-gather (前向时 gather 完整参数)
+  → forward compute
+  → reduce-scatter (反向时同步梯度)
+```
+
+**分布式初始化链：**
+```
+init_process_group(backend="nccl")
+  → ProcessGroup 创建
+  → rank / world_size 分配
+  → all_reduce / broadcast 等原语可用
+```
+
+### 8.4 关键文件索引（按功能分类）
+
+| 功能 | 文件路径 | 关键类/函数 |
+|------|---------|------------|
+| Module | `torch/nn/modules/module.py` | `nn.Module` |
+| Parameter | `torch/nn/parameter.py` | `Parameter`, `Buffer` |
+| autograd | `torch/autograd/__init__.py` | `backward`, `grad` |
+| Optimizer | `torch/optim/optimizer.py` | `Optimizer`, `AdamW` |
+| ProcessGroup | `torch/distributed/distributed_c10d.py` | `ProcessGroup`, `Backend` |
+| FSDP2 | `torch/distributed/fsdp/fully_sharded_data_parallel.py` | `FullyShardedDataParallel` |
+| DTensor | `torch/distributed/tensor/_api.py` | `distribute_tensor`, `DTensor` |
+| TP | `torch/distributed/tensor/parallel/api.py` | `ColwiseParallel`, `RowwiseParallel` |
+| PP | `torch/distributed/pipelining/stage.py` | `PipelineStage` |
+| DCP | `torch/distributed/checkpoint/state_dict.py` | `get_state_dict`, `set_state_dict` |
+| CUDA Graph | `torch/cuda/graphs.py` | `CUDAGraph`, `is_current_stream_capturing` |
+| compile | `torch/_inductor/compile_fx.py` | `compile_fx` |
+| spawn | `torch/multiprocessing/__init__.py` | `spawn` |
+
+### 8.5 配置参数速查
+
+| 参数/环境变量 | 说明 |
+|--------------|------|
+| `FSDP_MIXED_PRECISION` | FSDP 混合精度策略 |
+| `FSDP_AUTO_WRAP_POLICY` | 自动 wrap 策略 |
+| `CUDA_LAUNCH_BLOCKING` | CUDA 同步调试 |
+| `NCCL_DEBUG` | NCCL 调试级别 |
+| `TORCH_COMPILE` | torch.compile 启用 |
 
 ---
 
-## 9. "遇到问题时查哪里" 路由表
+## 9. 跨仓库技术对比表
+
+| 技术点 | PyTorch (native) | Megatron-LM | torchtitan | DeepSpeed | miles | slime | torchada | torch_musa |
+|--------|-----------------|------------|-----------|-----------|-------|-------|----------|-----------|
+| **并行策略** | FSDP2+TP+PP | TP+PP+DP+EP+CP | TP+PP+DP+CP | TP+PP+DP+EP | 继承后端 | 继承后端 | N/A | N/A |
+| **TP 实现** | DTensor-based | ColumnParallelLinear | DTensor-based | module_inject | 继承 Megatron | 继承 Megatron | N/A | N/A |
+| **PP 调度** | 1F1B / Interleaved | 1F1B / Interleaved | pipeline_llm | 1F1B PipelineEngine | 继承 Megatron | 继承 Megatron | N/A | N/A |
+| **DP 实现** | FSDP2 (DTensor) | DistributedOptimizer (ZeRO-1) | FSDP2 (DTensor) | ZeRO-1/2/3 | FSDP2 / 继承 | 继承 Megatron | N/A | N/A |
+| **EP 实现** | N/A | MoE 原生 EP | N/A | MoE EP (TokenChoice) | 继承 Megatron | 继承 Megatron | N/A | N/A |
+| **CP 实现** | N/A | 原生 CP + Hybrid CP | context_parallel | N/A | cp_utils.py | cp_utils.py | N/A | N/A |
+| **Recompute** | N/A | checkpointed_forward | FullAC / SelectiveAC / MemoryBudgetAC | activation_checkpointing | 继承后端 | 继承后端 | N/A | N/A |
+| **CUDA Graph** | CUDAGraph | 原生 CUDA Graph | CUDAGraphWrapper | N/A | 继承后端 | 继承后端 | _Rotation (LRU) | MUSAGraph |
+| **FP8 支持** | N/A | Transformer Engine FP8 | Float8LinearConverter | N/A | N/A | N/A | Triton FP8 kernel | N/A |
+| **FP4 支持** | N/A | NVFP4 | N/A | N/A | N/A | N/A | N/A | N/A |
+| **MoE 实现** | N/A | MoELayer + TopKRouter | N/A | MoE + TopKGate | 继承 Megatron | 继承 Megatron | Fused MoE Triton | N/A |
+| **RL 支持** | N/A | 仅训练后端 | TitanRL 实验 | N/A | GRPO/PPO 完整 | GRPO/PPO + Agentic | N/A | N/A |
+| **Weight Sync** | N/A | N/A | N/A | N/A | UpdateWeight | UpdateWeightFromDistributed | N/A | N/A |
+| **Rollout 引擎** | N/A | N/A | N/A | N/A | SGLang | SGLang | N/A | N/A |
+| **Checkpoint** | DCP | Dist checkpointing | DCP (Distributed CP) | checkpoint_engine | 继承后端 | 继承后端 | N/A | N/A |
+| **编译** | torch.compile (Inductor) | N/A | torch.compile | compile | 继承后端 | 继承后端 | N/A | Inductor |
+| **硬件支持** | CUDA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | Ada/RTX + MUSA | MUSA GPU |
+| **Ray 编排** | N/A | N/A | N/A | N/A | 完整支持 | 完整支持 | N/A | N/A |
+| **Fault Tolerance** | N/A | 基础容错 | N/A | N/A | 完整 FT | 基础容错 | N/A | N/A |
+| **内存优化** | FSDP2 + AC | ZeRO-1 + Recompute | FSDP2 + AC | ZeRO-3 + Offload | 继承后端 | 继承后端 | Graph Rotation | CachingAllocator |
+| **配置系统** | Python API | argparse + ConfigContainer | tyro-based | JSON ds_config | argparse | argparse | env vars | env vars |
+
+---
+
+## 10. "遇到问题时查哪里" 路由表
 
 | 问题类型 | 首选仓库 | 关键文件 | 说明 |
 |---------|---------|---------|------|
@@ -857,8 +970,18 @@ deepspeed/moe/layer.py:17  MoE
 | **TP 通信重叠** | Megatron-LM | `core/tensor_parallel/layers.py:634` | LinearWithGradAccumulationAndAsyncCommunication |
 | **PP 1F1B 调度** | Megatron-LM | `core/pipeline_parallel/schedules.py:2147` | 标准 1F1B 实现 |
 | **PP Interleaved** | Megatron-LM | `core/pipeline_parallel/schedules.py:1019` | Virtual pipeline 调度 |
-| **FSDP2 原理** | torchtitan | `distributed/fsdp.py:168` | DTensor-based FSDP2 |
+| **FSDP2 原理** | PyTorch | `torch/distributed/fsdp/fully_sharded_data_parallel.py:397` | FullyShardedDataParallel |
+| **FSDP2 wrap** | PyTorch | `torch/distributed/fsdp/wrap.py` | auto_wrap_policy |
+| **DTensor 原理** | PyTorch | `torch/distributed/tensor/_api.py` | distribute_tensor, DeviceMesh |
+| **Tensor Parallel** | PyTorch | `torch/distributed/tensor/parallel/api.py` | ColwiseParallel, RowwiseParallel |
+| **Pipeline Stage** | PyTorch | `torch/distributed/pipelining/stage.py` | PipelineStage |
+| **DCP Checkpoint** | PyTorch | `torch/distributed/checkpoint/state_dict.py` | get_state_dict, set_state_dict |
+| **CUDA Graph** | PyTorch | `torch/cuda/graphs.py:159` | CUDAGraph |
+| **torch.compile** | PyTorch | `torch/_inductor/compile_fx.py` | compile_fx |
 | **DeviceMesh 构建** | torchtitan | `distributed/parallel_dims.py:211` | build_mesh() |
+| **nn.Module 原理** | PyTorch | `torch/nn/modules/module.py:482` | Module.__init__ / parameters / state_dict |
+| **autograd 反向** | PyTorch | `torch/autograd/__init__.py` | backward, grad |
+| **Optimizer 基类** | PyTorch | `torch/optim/optimizer.py` | Optimizer.step / param_groups |
 | **ZeRO-1 优化器** | Megatron-LM | `core/optimizer/distrib_optimizer.py:113` | DistributedOptimizer |
 | **ZeRO-2/3 优化器** | DeepSpeed | `deepspeed/runtime/zero/stage_1_and_2.py:134` | DeepSpeedZeroOptimizer |
 | **ZeRO-3 Offload** | DeepSpeed | `deepspeed/runtime/zero/stage3.py` | DeepSpeedZeRoOffload |
@@ -904,19 +1027,29 @@ deepspeed/moe/layer.py:17  MoE
 
 ---
 
-## 10. 仓库间依赖关系
+## 11. 仓库间依赖关系
 
 ```
                     ┌─────────────────────────────────────────────────────┐
                     │                   训练栈全景                         │
                     └─────────────────────────────────────────────────────┘
 
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │                          PyTorch (Meta)                              │
+  │                  底层基础框架：nn / autograd / optim                   │
+  │                  distributed (FSDP2 / DTensor / TP / PP)              │
+  │                  cuda (Graph / Allocator / NCCL)                      │
+  │                  _inductor (torch.compile)                            │
+  └──────────────────────────────────────────────────────────────────────┘
+                                    │
+                    所有上层训练仓的底层依赖
+                                    │
   ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
   │   Megatron-LM    │     │   torchtitan     │     │    DeepSpeed     │
   │   (NVIDIA)       │     │   (Meta)         │     │   (Microsoft)    │
   │                  │     │                  │     │                  │
   │  全栈并行参考     │     │  PyTorch-native  │     │  ZeRO 优化库     │
-  │  TP/PP/DP/EP/CP  │     │  FSDP2 + TP + PP │     │  ZeRO-1/2/3     │
+  │  TP/PP/DP/EP+CP  │     │  FSDP2 + TP + PP │     │  ZeRO-1/2/3     │
   │  ZeRO-1 + FP8    │     │  torch.compile   │     │  MoE + PP + Auto │
   └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
            │                        │                        │
@@ -954,6 +1087,7 @@ deepspeed/moe/layer.py:17  MoE
                                                      └──────────────────┘
 
 依赖关系说明：
+  - PyTorch 是所有上层训练仓的底层基础框架
   - Megatron-LM ← miles, slime (作为训练后端)
   - torchtitan 独立，不依赖其他仓
   - DeepSpeed 独立库，封装 PyTorch 训练循环，可与 Megatron 配合使用

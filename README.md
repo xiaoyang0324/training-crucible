@@ -63,7 +63,8 @@ training-crucible/
 │   ├── inference.md                #   KV Cache · Quantization · Speculative decoding
 │   ├── hardware-adapter.md         #   Hardware adapter layer (torchada + torch_musa)
 │   ├── moe.md                      #   MoE cross-repo deep analysis
-│   └── deepspeed.md                #   DeepSpeed deep analysis
+│   ├── deepspeed.md                #   DeepSpeed deep analysis
+│   └── pytorch.md                  #   PyTorch core features analysis
 ├── skill-precision/                      # Precision expert
 │   ├── SKILL.md                    #   Capture → Classify → Localize → Hypothesize → Resolve
 │   └── references/                 #   Failure taxonomy · Known patterns
@@ -75,7 +76,7 @@ training-crucible/
 │   ├── TEMPLATE.md                 #   YAML frontmatter + 8 body sections
 │   └── *.md                        #   Seed cases from real project experience
 └── skill-references/                     # Shared references
-    ├── source-repo-map.md          #   7 repos → stage mapping
+    ├── source-repo-map.md          #   8 repos → stage mapping
     ├── training-glossary.md        #   90 canonical terms
     └── answer-conventions.md       #   Answer conventions + output templates
 ```
@@ -102,6 +103,7 @@ Every technical claim cites a **local source repo** (file path + line number) as
 
 | Repo | Stage | Hardware |
 |------|-------|----------|
+| PyTorch | Base framework (nn/autograd/optim/distributed/FSDP2/DTensor) | CUDA GPU |
 | Megatron-LM | Pre-training, Post-training, MoE | NVIDIA GPU |
 | torchtitan | Pre-training, RL | NVIDIA GPU |
 | DeepSpeed | Pre-training optimization (ZeRO/MoE/PP) | NVIDIA GPU |
@@ -116,7 +118,7 @@ Every technical claim cites a **local source repo** (file path + line number) as
 
 | Module | Files | Lines | Core |
 |--------|-------|-------|------|
-| Knowledge | 7 | ~5244 | 7-file knowledge Q&A (pretraining + RL + post-training + inference + hardware-adapter + MoE + DeepSpeed) |
+| Knowledge | 8 | ~6373 | 8-file knowledge Q&A (pretraining + RL + post-training + inference + hardware-adapter + MoE + DeepSpeed + PyTorch) |
 | Precision | 3 | ~1500 | 5-step diagnosis + failure taxonomy + known patterns |
 | Performance | 3 | ~1800 | 5-step optimization + bottleneck taxonomy + SOTA techniques |
 | Tickets | 7 | ~490 | Template + SKILL.md + 5 seed cases |
