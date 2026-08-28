@@ -1,8 +1,12 @@
-[中文](README_zh.md) | [English](README.md)
+[← Back to Root](../../README.md) | [中文](README_zh.md) | [English](README.md)
 
 # Performance Expert
 
 > 5-step optimization workflow — resolving low throughput, OOM, poor scaling efficiency.
+
+## What It Does
+
+This module is the **performance optimization engine** of training-crucible. When the user reports a performance bottleneck (low throughput, OOM, poor scaling), it executes a structured 5-step optimization workflow. Bottlenecks are classified into 5 types, matched against 14 SOTA techniques, and after resolution, archived to `skill-tickets/`.
 
 ## Workflow
 
@@ -10,13 +14,23 @@
 Profile → Identify → Match → Adapt → Validate & Archive
 ```
 
+| Step | Action | Output |
+|------|--------|--------|
+| **Profile** | Collect metrics: throughput, MFU, memory, communication ratio | Performance snapshot |
+| **Identify** | Classify bottleneck type (compute/memory/comm/IO/launch) | Bottleneck category |
+| **Match** | Map to SOTA techniques from `sota-techniques.md` | Candidate optimizations |
+| **Adapt** | Apply config changes, code modifications | Optimized config/code |
+| **Validate** | Measure improvement, archive to `skill-tickets/` | Validated ticket |
+
 ## File Structure
 
-| File | Purpose |
-|------|---------|
-| `SKILL.md` | 5-step optimization workflow engine (entry point) |
-| `references/bottleneck-taxonomy.md` | Bottleneck classification (5 types + diagnostic methods) |
-| `references/sota-techniques.md` | 14 SOTA optimization techniques catalog |
+| File | Purpose | Lines |
+|------|---------|-------|
+| `SKILL.md` | 5-step optimization workflow engine (entry point) | ~480 |
+| `references/bottleneck-taxonomy.md` | 5 bottleneck types + diagnostic methods | ~310 |
+| `references/sota-techniques.md` | 14 SOTA optimization techniques catalog | ~435 |
+
+**Total: ~1225 lines**
 
 ## Trigger Conditions
 
@@ -42,3 +56,12 @@ Profile → Identify → Match → Adapt → Validate & Archive
 - **Compute**: Flash Attention, Fused Operators, CUDA Graph, FP8/FP4
 - **Communication**: Comm Overlap, Sequence Packing, Async Pipeline, MoE Dispatch
 - **Parallelism**: FSDP2, Context Parallel, Expert Parallel
+
+## Cross-References
+
+| Need | Go To |
+|------|-------|
+| Concept explanation of a technique | `skill-knowledge/` |
+| Precision impact of a performance fix | `skill-precision/` |
+| Similar historical cases | `skill-tickets/` |
+| Source code for optimization | `skill-references/source-repo-map.md` |

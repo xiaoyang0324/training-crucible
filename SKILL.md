@@ -7,7 +7,7 @@ description: >
   loss 异常、梯度异常、吞吐优化、Megatron、torchtitan、miles、slime、
   预训练、后训练、对齐、强化学习、GRPO、PPO、推理优化、量化、KV Cache 等
   任何训练全栈相关话题。
-  源码参考仓：Megatron-LM, torchtitan, miles, slime, torchada, torch_musa。
+  源码参考仓：PyTorch, Megatron-LM, torchtitan, DeepSpeed, miles, slime, torchada, torch_musa。
 ---
 
 # training-crucible — AI 训练全栈专家
@@ -128,7 +128,7 @@ description: >
 
 | 模块 | 路径 | 说明 |
 |------|------|------|
-| 知识专家 | `skill-knowledge/` | 按训练阶段分 5 个文件 |
+| 知识专家 | `skill-knowledge/` | 按训练阶段分 8 个文件（预训练/后训练/RL/推理/硬件适配/MoE/DeepSpeed/PyTorch） |
 | 硬件适配 | `skill-knowledge/hardware-adapter.md` | torchada CUDA→MUSA 兼容层 + torch_musa MUSA 后端，含 patch 引擎、graph rotation、算子调度 |
 | MoE 深度分析 | `skill-knowledge/moe.md` | MoE 跨仓库代码级分析：Router/Load Balancing/Token Dispatch/EP，覆盖 Megatron/DeepSpeed/torchtitan/torchada |
 | DeepSpeed 深度分析 | `skill-knowledge/deepspeed.md` | ZeRO-1/2/3、MoE、Pipeline、Autotuning、Inference 代码级分析 |
